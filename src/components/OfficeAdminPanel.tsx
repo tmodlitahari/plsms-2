@@ -468,53 +468,14 @@ export default function OfficeAdminPanel({
     }
   }, [adminSearchResults, adminSearchQuery, isAdminSearching]);
 
-  // Search History for Admin Portal
-  const [isAdminFocused, setIsAdminFocused] = useState(false);
-  const [adminSearchHistory, setAdminSearchHistory] = useState<string[]>(() => {
-    try {
-      const cached = localStorage.getItem("nepal_dmv_admin_search_history");
-      return cached ? JSON.parse(cached) : [];
-    } catch (e) {
-      return [];
-    }
-  });
-
-  const [dbSuggestions, setDbSuggestions] = useState<string[]>([]);
-
+  // Ensure any legacy search history is cleared for privacy
   useEffect(() => {
-    const query = adminSearchQueryInput.trim();
-    if (query.length < 2) {
-      setDbSuggestions([]);
-      return;
+    try {
+      localStorage.removeItem("nepal_dmv_admin_search_history");
+    } catch (e) {
+      // Ignore
     }
-
-    const delayDebounce = setTimeout(async () => {
-      try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&exact=false&limit=6`);
-        const data = await res.json();
-        if (data.success && data.results) {
-          const matchedNo = data.results.map((r: any) => r.licenseNo);
-          const uniqueMatched = Array.from(new Set<string>(matchedNo)) as string[];
-          setDbSuggestions(uniqueMatched);
-        }
-      } catch (err) {
-        console.error("Error fetching autocomplete suggestions:", err);
-      }
-    }, 150);
-
-    return () => clearTimeout(delayDebounce);
-  }, [adminSearchQueryInput]);
-
-  const saveAdminHistory = (query: string) => {
-    if (!query) return;
-    const cleanQuery = query.trim();
-    setAdminSearchHistory(prev => {
-      const filtered = prev.filter(item => item !== cleanQuery);
-      const next = [cleanQuery, ...filtered].slice(0, 10);
-      localStorage.setItem("nepal_dmv_admin_search_history", JSON.stringify(next));
-      return next;
-    });
-  };
+  }, []);
 
   const getOrdinalLot = (index: number): string => {
     const j = index % 10;
@@ -1118,7 +1079,6 @@ export default function OfficeAdminPanel({
   const handleAdminSearch = async (e?: React.FormEvent, overrideQuery?: string) => {
     if (e) e.preventDefault();
     setAdminValidationError(null);
-    setIsAdminFocused(false);
 
     let query = overrideQuery !== undefined ? overrideQuery.trim() : adminSearchQueryInput.trim();
     if (!query) {
@@ -1157,7 +1117,6 @@ export default function OfficeAdminPanel({
 
     setAdminAnimState("fading-out");
     setHandoverStatusMsg(null);
-    saveAdminHistory(query);
 
     setTimeout(async () => {
       setAdminSearchQuery(query);
@@ -1308,9 +1267,6 @@ export default function OfficeAdminPanel({
           {loginError && (
             <div className="p-3 text-xs font-bold rounded border bg-red-50 text-red-800 border-red-200 text-left">
               ⚠ {loginError}
-              <div className="mt-1.5 pt-1.5 border-t border-red-100 text-[10px]">
-                के तपाईं पासवर्ड बिर्सनुभयो? <button type="button" onClick={handleResetPasswordToDefault} className="underline text-blue-700 hover:text-blue-900 font-extrabold ml-1 uppercase">पासवर्ड रिसेट गर्नुहोस् (Reset Password)</button>
-              </div>
             </div>
           )}
 
@@ -1326,7 +1282,7 @@ export default function OfficeAdminPanel({
               <input
                 type="email"
                 required
-                placeholder="उदा. tmodlitahari@gmail.com"
+                placeholder="इमेल ठेगाना प्रविष्ट गर्नुहोस्"
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
                 className="w-full px-3.5 py-2.5 bg-white border-2 border-slate-200 focus:border-[#20409a] rounded-lg shadow-inner text-xs font-bold text-slate-800 placeholder-slate-300 focus:outline-none"
@@ -1334,16 +1290,7 @@ export default function OfficeAdminPanel({
             </div>
 
             <div className="space-y-1">
-              <div className="flex justify-between items-center">
-                <label className="block text-[11px] uppercase tracking-wider text-slate-500">पासवर्ड (PASSWORD):</label>
-                <button
-                  type="button"
-                  onClick={handleResetPasswordToDefault}
-                  className="text-[10px] text-blue-600 hover:text-blue-800 font-extrabold underline cursor-pointer uppercase tracking-wider"
-                >
-                  रिसेट गर्नुहोस् (Reset)
-                </button>
-              </div>
+              <label className="block text-[11px] uppercase tracking-wider text-slate-500">पासवर्ड (PASSWORD):</label>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
@@ -1496,9 +1443,10 @@ export default function OfficeAdminPanel({
                         setAdminSearchQueryInput(formatted);
                         setAdminValidationError(null);
                       }}
-                      onFocus={() => setIsAdminFocused(true)}
-                      onBlur={() => setIsAdminFocused(false)}
                       maxLength={14}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
                       className="w-full px-4 py-3 bg-white border-2 border-slate-300 focus:border-[#20409a] rounded-lg shadow-inner text-sm md:text-base font-bold text-slate-800 focus:outline-none placeholder-slate-300 font-mono text-center md:text-left"
                     />
                     {adminSearchQueryInput && (
@@ -1513,87 +1461,6 @@ export default function OfficeAdminPanel({
                         <XCircle className="w-5 h-5" />
                       </button>
                     )}
-
-                    {/* Admin suggestions dropdown */}
-                    {(() => {
-                      const filteredHistory = adminSearchQueryInput.trim() 
-                        ? adminSearchHistory.filter(item => item.toLowerCase().includes(adminSearchQueryInput.toLowerCase()))
-                        : adminSearchHistory;
-                      
-                      if (!isAdminFocused || (filteredHistory.length === 0 && dbSuggestions.length === 0)) return null;
-
-                      return (
-                        <div className="absolute left-0 right-0 top-full mt-1.5 bg-white border-2 border-slate-300 rounded-xl shadow-xl z-50 overflow-hidden text-left divide-y divide-slate-100 font-sans">
-                          
-                          {/* Section 1: Recent Searches */}
-                          {filteredHistory.length > 0 && (
-                            <div>
-                              <div className="bg-slate-50 px-3.5 py-2 flex justify-between items-center text-[10px] font-black text-slate-500 uppercase tracking-wider">
-                                <span>प्रशासक खोज इतिहास (Admin Recent Searches)</span>
-                                <button
-                                  type="button"
-                                  onMouseDown={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setAdminSearchHistory([]);
-                                    localStorage.removeItem("nepal_dmv_admin_search_history");
-                                  }}
-                                  className="text-red-500 hover:text-red-700 hover:underline normal-case font-extrabold text-[10px]"
-                                >
-                                  Clear History
-                                </button>
-                              </div>
-                              <div className="divide-y divide-slate-50 max-h-40 overflow-y-auto">
-                                {filteredHistory.map((item, idx) => (
-                                  <div
-                                    key={`hist-${idx}`}
-                                    onMouseDown={(e) => {
-                                      e.preventDefault();
-                                      setAdminSearchQueryInput(item);
-                                      setAdminValidationError(null);
-                                      setIsAdminFocused(false);
-                                      handleAdminSearch(undefined, item);
-                                    }}
-                                    className="px-4 py-2.5 hover:bg-blue-50 cursor-pointer flex items-center justify-between text-slate-800 font-bold font-mono text-sm transition-all"
-                                  >
-                                    <span>{item}</span>
-                                    <span className="text-[10px] text-blue-600 bg-blue-50 px-2 py-0.5 rounded font-sans uppercase font-extrabold">History</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Section 2: Predictive Matches */}
-                          {dbSuggestions.length > 0 && (
-                            <div>
-                              <div className="bg-slate-50 px-3.5 py-2 text-[10px] font-black text-slate-500 uppercase tracking-wider">
-                                <span>संभावित नम्बरहरू (Predictive Autocomplete)</span>
-                              </div>
-                              <div className="divide-y divide-slate-50 max-h-40 overflow-y-auto">
-                                {dbSuggestions.map((item, idx) => (
-                                  <div
-                                    key={`sug-${idx}`}
-                                    onMouseDown={(e) => {
-                                      e.preventDefault();
-                                      setAdminSearchQueryInput(item);
-                                      setAdminValidationError(null);
-                                      setIsAdminFocused(false);
-                                      handleAdminSearch(undefined, item);
-                                    }}
-                                    className="px-4 py-2.5 hover:bg-emerald-50 cursor-pointer flex items-center justify-between text-slate-800 font-bold font-mono text-sm transition-all"
-                                  >
-                                    <span>{item}</span>
-                                    <span className="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-sans uppercase font-extrabold">Suggest</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                        </div>
-                      );
-                    })()}
                   </div>
                   
                   <div className="grid grid-cols-2 md:flex gap-3 shrink-0">
@@ -2801,7 +2668,7 @@ export default function OfficeAdminPanel({
                             <input
                               type="text"
                               required
-                              placeholder="tmo.staff@gmail.com वा staff"
+                              placeholder="इमेल वा युजरनेम प्रविष्ट गर्नुहोस्"
                               value={newUserEmail}
                               onChange={(e) => setNewUserEmail(e.target.value)}
                               className="w-full pl-8 pr-3 py-2.5 bg-white border-2 border-slate-200 focus:border-indigo-500 rounded-lg shadow-inner text-xs font-bold text-slate-800 placeholder-slate-300 focus:outline-none"

@@ -40,22 +40,19 @@ export default function PublicSearchPortal({
   handleReset
 }: PublicSearchPortalProps) {
   const [validationError, setValidationError] = React.useState<string | null>(null);
-  const [isFocused, setIsFocused] = React.useState(false);
   const publicInputRef = React.useRef<HTMLInputElement | null>(null);
   const [animState, setAnimState] = React.useState<"idle" | "fading-out" | "loading" | "fading-in" | "show">("idle");
   const [renderResults, setRenderResults] = React.useState<LicenseRecord[]>([]);
   const [renderQuery, setRenderQuery] = React.useState<string>("");
 
-  const [searchHistory, setSearchHistory] = React.useState<string[]>(() => {
+  // Ensure any legacy search history is cleared for privacy
+  React.useEffect(() => {
     try {
-      const cached = localStorage.getItem("nepal_dmv_public_search_history");
-      return cached ? JSON.parse(cached) : [];
+      localStorage.removeItem("nepal_dmv_public_search_history");
     } catch (e) {
-      return [];
+      // Ignore
     }
-  });
-
-  const [dbSuggestions, setDbSuggestions] = React.useState<string[]>([]);
+  }, []);
 
   // QR Modal State and Handlers
   const [isQrModalOpen, setIsQrModalOpen] = React.useState(false);
@@ -207,41 +204,6 @@ export default function PublicSearchPortal({
     }
   };
 
-  React.useEffect(() => {
-    const query = searchQueryInput.trim();
-    if (query.length < 2) {
-      setDbSuggestions([]);
-      return;
-    }
-
-    const delayDebounce = setTimeout(async () => {
-      try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&exact=false&limit=6`);
-        const data = await res.json();
-        if (data.success && data.results) {
-          const matchedNo = data.results.map((r: any) => r.licenseNo);
-          const uniqueMatched = Array.from(new Set<string>(matchedNo)) as string[];
-          setDbSuggestions(uniqueMatched);
-        }
-      } catch (err) {
-        console.error("Error fetching autocomplete suggestions:", err);
-      }
-    }, 150);
-
-    return () => clearTimeout(delayDebounce);
-  }, [searchQueryInput]);
-
-  const saveHistory = (query: string) => {
-    if (!query) return;
-    const cleanQuery = query.trim();
-    setSearchHistory(prev => {
-      const filtered = prev.filter(item => item !== cleanQuery);
-      const next = [cleanQuery, ...filtered].slice(0, 10);
-      localStorage.setItem("nepal_dmv_public_search_history", JSON.stringify(next));
-      return next;
-    });
-  };
-
   const formatLicenseNumber = (value: string): string => {
     if (value.includes("-") || value.includes(" ")) {
       return value;
@@ -317,7 +279,6 @@ export default function PublicSearchPortal({
 
     setAnimState("fading-out");
     setTimeout(() => {
-      saveHistory(query);
       handleSearchSubmit(e, query);
     }, 150);
   };
@@ -412,9 +373,10 @@ export default function PublicSearchPortal({
                     placeholder="XX-XX-XXXXXXXX"
                     value={searchQueryInput}
                     onChange={handleInputChange}
-                    onFocus={() => setIsFocused(true)}
-                    onBlur={() => setIsFocused(false)}
                     maxLength={14}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
                     className="w-full px-4 py-3 bg-white border-2 border-slate-300 focus:border-[#20409a] rounded-lg shadow-inner text-base md:text-lg font-bold font-mono tracking-widest text-center md:text-left focus:outline-none focus:ring-4 focus:ring-blue-100 text-slate-800 placeholder-slate-300"
                   />
                   {searchQueryInput && (
@@ -429,44 +391,6 @@ export default function PublicSearchPortal({
                       <XCircle className="w-5 h-5" />
                     </button>
                   )}
-
-                  {/* Public suggestions dropdown */}
-                  {(() => {
-                    if (!isFocused || dbSuggestions.length === 0) return null;
-
-                    return (
-                      <div className="absolute left-0 right-0 top-full mt-1.5 bg-white border-2 border-slate-300 rounded-xl shadow-xl z-50 overflow-hidden text-left divide-y divide-slate-100 font-sans">
-                        
-                        {/* Section 2: Predictive Matches */}
-                        {dbSuggestions.length > 0 && (
-                          <div>
-                            <div className="bg-slate-50 px-3.5 py-2 text-[10px] font-black text-slate-500 uppercase tracking-wider">
-                              <span>संभावित नम्बरहरू (Predictive Autocomplete)</span>
-                            </div>
-                            <div className="divide-y divide-slate-50 max-h-40 overflow-y-auto">
-                              {dbSuggestions.map((item, idx) => (
-                                <div
-                                  key={`sug-${idx}`}
-                                  onMouseDown={(e) => {
-                                    e.preventDefault();
-                                    setSearchQueryInput(item);
-                                    setValidationError(null);
-                                    setIsFocused(false);
-                                    handleSearchSubmit(undefined, item);
-                                  }}
-                                  className="px-4 py-2.5 hover:bg-emerald-50 cursor-pointer flex items-center justify-between text-slate-800 font-bold font-mono text-sm transition-all"
-                                >
-                                  <span>{item}</span>
-                                  <span className="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-sans uppercase font-extrabold">Suggest</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                      </div>
-                    );
-                  })()}
                 </div>
                 
                 <div className="grid grid-cols-2 md:flex gap-3 shrink-0">
