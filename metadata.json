@@ -1,0 +1,6 @@
+{
+  "name": "Nepal Printed License Search",
+  "description": "A real-time search and management tool for checking printed license availability in Nepal government offices, supporting large datasets up to 200,000 records.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

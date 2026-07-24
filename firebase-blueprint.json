@@ -1,0 +1,34 @@
+{
+  "collections": {
+    "licenses": {
+      "schema": {
+        "sn": "string",
+        "applicantId": "string",
+        "fullName": "string",
+        "licenseNo": "string",
+        "category": "string",
+        "oldCode": "string",
+        "newCode": "string",
+        "visitDate": "string",
+        "receivedBy": "string"
+      },
+      "indexes": [
+        {
+          "fields": [
+            { "fieldPath": "applicantId", "order": "ASCENDING" }
+          ]
+        },
+        {
+          "fields": [
+            { "fieldPath": "licenseNo", "order": "ASCENDING" }
+          ]
+        },
+        {
+          "fields": [
+            { "fieldPath": "fullName", "order": "ASCENDING" }
+          ]
+        }
+      ]
+    }
+  }
+}

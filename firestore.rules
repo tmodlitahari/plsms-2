@@ -1,0 +1,14 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Standard rule configuration for central DMV license portal
+    match /licenses/{licenseId} {
+      // Allow read access to anyone (to allow license search from the app)
+      allow read: if true;
+      
+      // Allow write access (create, update, delete) only for authorized backend/admin requests
+      // Standard Firebase Admin SDK requests bypass security rules, but we write rules to secure direct client updates
+      allow write: if false;
+    }
+  }
+}
