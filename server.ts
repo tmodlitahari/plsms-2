@@ -49,9 +49,32 @@ function loadUploadedLotsIntoCache() {
     if (fs.existsSync(UPLOADED_LOTS_PATH)) {
       const rawData = fs.readFileSync(UPLOADED_LOTS_PATH, "utf-8");
       uploadedLotsCache = JSON.parse(rawData);
+      if (licensesCache.length === 0 && uploadedLotsCache.length > 0) {
+        console.log("[Database] Database cache is empty (0 records). Clearing ghost uploaded lots.");
+        uploadedLotsCache = [];
+        fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8");
+      }
       console.log(`[Database] Loaded ${uploadedLotsCache.length} uploaded lots from disk.`);
     } else {
       uploadedLotsCache = [];
+    }
+
+    if (uploadedLotsCache.length === 0 && licensesCache.length > 0) {
+      const lotCounts: Record<string, number> = {};
+      for (const rec of licensesCache) {
+        const code = rec.lotCode || "LOT-RESTORED";
+        lotCounts[code] = (lotCounts[code] || 0) + 1;
+      }
+      const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      uploadedLotsCache = Object.entries(lotCounts).map(([code, count]) => ({
+        id: code,
+        name: `${code}.xlsx`,
+        uploadDate: todayStr,
+        records: count,
+        status: "Active"
+      }));
+      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+      console.log(`[Database] Synthesized ${uploadedLotsCache.length} uploaded lot entries from active licenses.`);
     }
   } catch (error) {
     console.error("Error loading uploaded lots into cache:", error);
@@ -97,12 +120,15 @@ async function initFirebase(): Promise<boolean> {
         ? rootConfigPath 
         : (fs.existsSync(appletConfigPath) ? appletConfigPath : null));
 
+    let databaseId: string | undefined = process.env.FIREBASE_DATABASE_ID;
+
     if (activeConfigPath) {
       try {
         const config = JSON.parse(fs.readFileSync(activeConfigPath, "utf-8"));
         projectId = config.projectId || config.project_id || projectId;
         clientEmail = config.clientEmail || config.client_email || clientEmail;
         privateKey = config.privateKey || config.private_key || privateKey;
+        databaseId = config.firestoreDatabaseId || config.databaseId || config.database_id || databaseId;
       } catch (e) {
         console.error("Error reading Firebase config file:", e);
       }
@@ -151,7 +177,11 @@ async function initFirebase(): Promise<boolean> {
       firebaseApp = initializeApp({ projectId }, "nepal-license-central-db");
     }
 
-    firestoreDb = getFirestore(firebaseApp);
+    if (databaseId) {
+      firestoreDb = getFirestore(firebaseApp, databaseId);
+    } else {
+      firestoreDb = getFirestore(firebaseApp);
+    }
     firebaseConfigError = null;
     console.log(`[Firebase] Admin initialized successfully for project: ${projectId}`);
     return true;
@@ -297,6 +327,25 @@ async function pullFromFirestore() {
     // Also pull uploaded lots from Firestore
     await pullLotsFromFirestore();
 
+    // If uploaded lots cache is empty but we have licenses, auto-synthesize uploaded lots metadata from actual records
+    if (uploadedLotsCache.length === 0 && licensesCache.length > 0) {
+      const lotCounts: Record<string, number> = {};
+      for (const rec of licensesCache) {
+        const code = rec.lotCode || "LOT-RESTORED";
+        lotCounts[code] = (lotCounts[code] || 0) + 1;
+      }
+      const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      uploadedLotsCache = Object.entries(lotCounts).map(([code, count]) => ({
+        id: code,
+        name: `${code}.xlsx`,
+        uploadDate: todayStr,
+        records: count,
+        status: "Active"
+      }));
+      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+      await pushLotsToFirestore();
+    }
+
     activeSyncStatus.isSyncing = false;
   } catch (err: any) {
     console.error("[Firebase] Sync pull error:", err);
@@ -362,11 +411,32 @@ async function pullLotsFromFirestore() {
     const doc = await docRef.get();
     if (doc.exists) {
       const data = doc.data();
-      if (data && Array.isArray(data.lots)) {
+      if (data && Array.isArray(data.lots) && data.lots.length > 0) {
         uploadedLotsCache = data.lots;
         fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
         console.log(`[Firebase] Successfully pulled ${uploadedLotsCache.length} uploaded lots from Firestore.`);
+        return;
       }
+    }
+
+    // Fallback: If uploaded lots doc is missing or empty, but licensesCache has records, synthesize lot list
+    if (licensesCache.length > 0) {
+      const lotCounts: Record<string, number> = {};
+      for (const rec of licensesCache) {
+        const code = rec.lotCode || "LOT-RESTORED";
+        lotCounts[code] = (lotCounts[code] || 0) + 1;
+      }
+      const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      uploadedLotsCache = Object.entries(lotCounts).map(([code, count]) => ({
+        id: code,
+        name: `${code}.xlsx`,
+        uploadDate: todayStr,
+        records: count,
+        status: "Active"
+      }));
+      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+      await pushLotsToFirestore();
+      console.log(`[Firebase] Synthesized and backed up ${uploadedLotsCache.length} lots from active license records.`);
     }
   } catch (err) {
     console.error("[Firebase] Error pulling uploaded lots from Firestore:", err);
@@ -738,6 +808,20 @@ app.post(
       }
 
       if (isAlreadySynced) {
+        if (uploadedLotsCache.length === 0) {
+          const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+          uploadedLotsCache = [{
+            id: lotCode,
+            name: filename,
+            uploadDate: todayStr,
+            records: licensesCache.length,
+            status: "Active"
+          }];
+          fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+          if (firestoreDb) {
+            pushLotsToFirestore().catch(() => {});
+          }
+        }
         return res.json({
           success: true,
           alreadySynced: true,
@@ -823,6 +907,32 @@ app.post(
       if (fs.existsSync(RESET_FLAG_PATH)) {
         fs.unlinkSync(RESET_FLAG_PATH);
       }
+
+      // Update uploaded lots metadata automatically
+      const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+      const lotEntry = {
+        id: lotCode,
+        name: filename,
+        uploadDate: todayStr,
+        records: nonDuplicates.length,
+        status: "Active"
+      };
+
+      if (method === "overwrite") {
+        uploadedLotsCache = [lotEntry];
+      } else {
+        const existingIdx = uploadedLotsCache.findIndex(l => l.id === lotCode);
+        if (existingIdx !== -1) {
+          uploadedLotsCache[existingIdx] = {
+            ...uploadedLotsCache[existingIdx],
+            records: (uploadedLotsCache[existingIdx].records || 0) + nonDuplicates.length,
+            uploadDate: todayStr
+          };
+        } else {
+          uploadedLotsCache.push(lotEntry);
+        }
+      }
+      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
 
       // Write directly to Firestore as Single Source of Truth
       if (firestoreDb) {
@@ -1198,54 +1308,10 @@ async function startServer() {
   console.log(" PLSMS - Central Database Startup Routine ");
   console.log("=========================================");
 
-  // 1. Load uploaded lots from disk cache first as fallback
+  // 1. Load local cache into RAM immediately so server is instantly ready
+  loadDatabaseIntoCache();
   loadUploadedLotsIntoCache();
-
-  // 2. Initialize Firebase Admin SDK
-  const firebaseConnected = await initFirebase();
-
-  if (firebaseConnected && firestoreDb) {
-    console.log("[Firebase] Firestore Connected successfully.");
-
-    try {
-      // Check if dataset exists in Firestore
-      const chunksCollection = firestoreDb.collection("dataset_chunks");
-      const manifestDoc = await chunksCollection.doc("manifest").get();
-      let hasFirestoreData = manifestDoc.exists;
-
-      if (!hasFirestoreData) {
-        const legacyRef = firestoreDb.collection("licenses");
-        const legacySnapshot = await legacyRef.limit(1).get();
-        hasFirestoreData = !legacySnapshot.empty;
-      }
-
-      if (hasFirestoreData) {
-        console.log("[Firebase] Production dataset found in Firestore. Loading records directly from Firestore into cache...");
-        await pullFromFirestore();
-        await pullLotsFromFirestore();
-        console.log(`[Firebase] Loaded ${licensesCache.length.toLocaleString()} license records from Firestore.`);
-      } else {
-        console.log("[Firebase] Firestore is empty on startup. Checking for local dataset fallback...");
-        loadDatabaseIntoCache();
-        if (licensesCache.length > 0) {
-          console.log(`[Firebase] Migrating ${licensesCache.length.toLocaleString()} local records to Firestore...`);
-          await pushToFirestoreInBatches(licensesCache);
-          await pushLotsToFirestore();
-        }
-      }
-    } catch (err) {
-      console.error("[Firebase] Error reading Firestore on startup:", err);
-      loadDatabaseIntoCache();
-    }
-  } else {
-    console.log("[Firebase] Firestore not connected. Loading local backup database into cache...");
-    loadDatabaseIntoCache();
-  }
-
-  console.log(`[Server] Cache Ready: ${licensesCache.length.toLocaleString()} records active in RAM cache.`);
-  console.log("[Server] Dashboard Ready");
-  console.log("[Server] Search Ready");
-  console.log("[Server] Reports Ready");
+  console.log(`[Server] Local Cache Initialized: ${licensesCache.length.toLocaleString()} records active in RAM cache.`);
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -1266,7 +1332,49 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Server] Server Ready on http://0.0.0.0:${PORT}`);
+    console.log("[Server] Dashboard Ready");
+    console.log("[Server] Search Ready");
+    console.log("[Server] Reports Ready");
   });
+
+  // 2. Initialize Firebase Admin SDK and sync in background (non-blocking)
+  (async () => {
+    try {
+      const firebaseConnected = await initFirebase();
+      if (firebaseConnected && firestoreDb) {
+        console.log("[Firebase] Firestore Connected successfully.");
+
+        // Check if dataset exists in Firestore
+        const chunksCollection = firestoreDb.collection("dataset_chunks");
+        const manifestDoc = await chunksCollection.doc("manifest").get();
+        let hasFirestoreData = manifestDoc.exists;
+
+        if (!hasFirestoreData) {
+          const legacyRef = firestoreDb.collection("licenses");
+          const legacySnapshot = await legacyRef.limit(1).get();
+          hasFirestoreData = !legacySnapshot.empty;
+        }
+
+        if (hasFirestoreData) {
+          console.log("[Firebase] Production dataset found in Firestore. Loading records directly from Firestore into cache...");
+          await pullFromFirestore();
+          await pullLotsFromFirestore();
+          console.log(`[Firebase] Loaded ${licensesCache.length.toLocaleString()} license records from Firestore.`);
+        } else {
+          console.log("[Firebase] Firestore is empty on startup. Checking for local dataset fallback...");
+          if (licensesCache.length > 0) {
+            console.log(`[Firebase] Migrating ${licensesCache.length.toLocaleString()} local records to Firestore...`);
+            await pushToFirestoreInBatches(licensesCache);
+            await pushLotsToFirestore();
+          }
+        }
+      } else {
+        console.log("[Firebase] Firestore not connected. Using local backup database.");
+      }
+    } catch (err) {
+      console.error("[Firebase] Error during background Firestore startup sync:", err);
+    }
+  })();
 }
 
 startServer();

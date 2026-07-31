@@ -599,8 +599,9 @@ export default function OfficeAdminPanel({
       try {
         const res = await fetch("/api/uploaded-lots");
         const data = await res.json();
-        if (data.success && Array.isArray(data.uploadedLots) && data.uploadedLots.length > 0) {
+        if (data.success && Array.isArray(data.uploadedLots)) {
           setUploadedLots(data.uploadedLots);
+          localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(data.uploadedLots));
         }
       } catch (e) {
         console.error("Error fetching uploaded lots from server:", e);
@@ -715,6 +716,14 @@ export default function OfficeAdminPanel({
 
   // Self-Healing Logic: Automatically align total lot records with totalInDb if there's a discrepancy
   useEffect(() => {
+    if (!hasLoadedServerLots.current) return;
+
+    if (totalInDb === 0 && uploadedLots.length > 0) {
+      setUploadedLots([]);
+      localStorage.setItem("nepal_dmv_uploaded_lots", "[]");
+      return;
+    }
+
     if (totalInDb > 0 && uploadedLots.length > 0) {
       const totalLotRecords = uploadedLots.reduce((acc, lot) => acc + (Number(lot.records) || 0), 0);
       if (totalLotRecords !== totalInDb) {
