@@ -22,7 +22,7 @@ interface LicenseRecord {
 }
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const DATA_DIR = path.join(process.cwd(), "data");
 const JSON_DB_PATH = path.join(DATA_DIR, "license_db.json");
 const CSV_DB_PATH = path.join(DATA_DIR, "license_db.csv");
