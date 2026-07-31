@@ -187,9 +187,7 @@ export default function App() {
   // Statistics State
   const [stats, setStats] = useState<Stats | null>(null);
 
-  // Admin / Seeding state
-  const [seedCount, setSeedCount] = useState<number>(20000);
-  const [isSeeding, setIsSeeding] = useState(false);
+  // Admin upload state
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ 
     success: boolean; 
@@ -486,42 +484,6 @@ export default function App() {
     performSearch(searchQuery, page);
   }, [searchQuery, page]);
 
-  // Seed database helper
-  const handleSeed = async (countToSeed: number, lotCode?: string) => {
-    setIsSeeding(true);
-    setUploadStatus(null);
-    try {
-      const url = `/api/seed?count=${countToSeed}${lotCode ? `&lotCode=${encodeURIComponent(lotCode)}` : ""}`;
-      const response = await fetch(url, {
-        method: "POST",
-      });
-      const data = await response.json();
-      if (data.success) {
-        setUploadStatus({
-          success: true,
-          message: `Successfully seeded ${data.total.toLocaleString()} mock license records! Ready for instant searching.`,
-          count: data.total,
-          lotCode
-        });
-        fetchStats();
-        setSearchQuery("");
-        setResults([]);
-      } else {
-        setUploadStatus({
-          success: false,
-          message: data.error || "Failed to seed mock data.",
-        });
-      }
-    } catch (e: any) {
-      setUploadStatus({
-        success: false,
-        message: e.message || "An error occurred during database seeding.",
-      });
-    } finally {
-      setIsSeeding(false);
-    }
-  };
-
   // File Upload Helper
   const handleFileUpload = async (file: File) => {
     if (!file) return;
@@ -665,9 +627,6 @@ export default function App() {
           isUploading={isUploading}
           loadMethod={loadMethod}
           setLoadMethod={setLoadMethod}
-          seedCount={seedCount}
-          setSeedCount={setSeedCount}
-          isSeeding={isSeeding}
           showConfigModal={showConfigModal}
           setShowConfigModal={setShowConfigModal}
           isSavingConfig={isSavingConfig}
@@ -690,7 +649,6 @@ export default function App() {
           handleFirebasePullSync={handleFirebasePullSync}
           handleDisconnectFirebase={handleDisconnectFirebase}
           handleSaveFirebaseConfig={handleSaveFirebaseConfig}
-          handleSeed={handleSeed}
           handleExport={handleExport}
           fetchStats={fetchStats}
           setUploadStatus={setUploadStatus}

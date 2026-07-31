@@ -82,49 +82,37 @@ let firebaseConfigError: string | null = null;
 // Function to initialize or re-initialize Firebase Admin dynamically
 async function initFirebase(): Promise<boolean> {
   try {
-    let projectId = process.env.FIREBASE_PROJECT_ID;
+    let projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
     let clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     let privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
-    // Load from json config file if exists (check data dir first, then root dir fallback)
+    // Load from json config files if existing
     const configPath = path.join(DATA_DIR, "firebase_config.json");
     const rootConfigPath = path.join(process.cwd(), "firebase_config.json");
-    const activeConfigPath = fs.existsSync(configPath) ? configPath : (fs.existsSync(rootConfigPath) ? rootConfigPath : null);
+    const appletConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+    
+    const activeConfigPath = fs.existsSync(configPath) 
+      ? configPath 
+      : (fs.existsSync(rootConfigPath) 
+        ? rootConfigPath 
+        : (fs.existsSync(appletConfigPath) ? appletConfigPath : null));
 
     if (activeConfigPath) {
       try {
         const config = JSON.parse(fs.readFileSync(activeConfigPath, "utf-8"));
-        projectId = config.projectId || projectId;
-        clientEmail = config.clientEmail || clientEmail;
-        privateKey = config.privateKey || privateKey;
+        projectId = config.projectId || config.project_id || projectId;
+        clientEmail = config.clientEmail || config.client_email || clientEmail;
+        privateKey = config.privateKey || config.private_key || privateKey;
       } catch (e) {
-        console.error("Error reading firebase_config.json:", e);
+        console.error("Error reading Firebase config file:", e);
       }
     }
 
-    if (!projectId || !clientEmail || !privateKey) {
+    if (!projectId) {
       firebaseApp = null;
       firestoreDb = null;
-      firebaseConfigError = "Firebase not yet configured. Please submit credentials in the Admin panel.";
+      firebaseConfigError = "Firebase project ID not found. Please submit credentials in the Admin panel.";
       return false;
-    }
-
-    // Clean private key formatting (convert raw "\n" strings and handle enclosing quotes / escapes)
-    let cleanedPrivateKey = privateKey.trim();
-    if ((cleanedPrivateKey.startsWith('"') && cleanedPrivateKey.endsWith('"')) || 
-        (cleanedPrivateKey.startsWith("'") && cleanedPrivateKey.endsWith("'"))) {
-      cleanedPrivateKey = cleanedPrivateKey.slice(1, -1).trim();
-    }
-    
-    // Replace double-escaped newlines and standard backslash-n sequences
-    cleanedPrivateKey = cleanedPrivateKey.replace(/\\n/g, "\n");
-    cleanedPrivateKey = cleanedPrivateKey.replace(/\\r/g, "\r");
-    cleanedPrivateKey = cleanedPrivateKey.replace(/\\"/g, '"');
-    cleanedPrivateKey = cleanedPrivateKey.replace(/\\'/g, "'");
-
-    // Ensure BEGIN and END tags are present and properly formatted
-    if (cleanedPrivateKey && !cleanedPrivateKey.includes("-----BEGIN PRIVATE KEY-----")) {
-      cleanedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${cleanedPrivateKey}\n-----END PRIVATE KEY-----`;
     }
 
     // Clean up existing app instance to prevent duplicate app errors
@@ -134,13 +122,34 @@ async function initFirebase(): Promise<boolean> {
       } catch (e) {}
     }
 
-    firebaseApp = initializeApp({
-      credential: cert({
-        projectId,
-        clientEmail,
-        privateKey: cleanedPrivateKey,
-      })
-    }, "nepal-license-central-db");
+    if (clientEmail && privateKey) {
+      // Clean private key formatting
+      let cleanedPrivateKey = privateKey.trim();
+      if ((cleanedPrivateKey.startsWith('"') && cleanedPrivateKey.endsWith('"')) || 
+          (cleanedPrivateKey.startsWith("'") && cleanedPrivateKey.endsWith("'"))) {
+        cleanedPrivateKey = cleanedPrivateKey.slice(1, -1).trim();
+      }
+      
+      cleanedPrivateKey = cleanedPrivateKey.replace(/\\n/g, "\n");
+      cleanedPrivateKey = cleanedPrivateKey.replace(/\\r/g, "\r");
+      cleanedPrivateKey = cleanedPrivateKey.replace(/\\"/g, '"');
+      cleanedPrivateKey = cleanedPrivateKey.replace(/\\'/g, "'");
+
+      if (cleanedPrivateKey && !cleanedPrivateKey.includes("-----BEGIN PRIVATE KEY-----")) {
+        cleanedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${cleanedPrivateKey}\n-----END PRIVATE KEY-----`;
+      }
+
+      firebaseApp = initializeApp({
+        credential: cert({
+          projectId,
+          clientEmail,
+          privateKey: cleanedPrivateKey,
+        })
+      }, "nepal-license-central-db");
+    } else {
+      // Default application credentials / project initialization
+      firebaseApp = initializeApp({ projectId }, "nepal-license-central-db");
+    }
 
     firestoreDb = getFirestore(firebaseApp);
     firebaseConfigError = null;
@@ -273,37 +282,16 @@ async function pullFromFirestore() {
 
     console.log(`[Firebase] Pull complete. Loaded ${records.length} records.`);
     
-    let isIdentical = false;
-    if (records.length > 0 && records.length === licensesCache.length) {
-      let allMatched = true;
-      for (let i = 0; i < Math.min(100, records.length); i++) {
-        const r1 = records[i];
-        const r2 = licensesCache[i];
-        if (
-          (r1.applicantId || "").trim() !== (r2.applicantId || "").trim() ||
-          (r1.fullName || "").trim() !== (r2.fullName || "").trim() ||
-          (r1.licenseNo || "").trim() !== (r2.licenseNo || "").trim()
-        ) {
-          allMatched = false;
-          break;
-        }
-      }
-      if (allMatched) {
-        isIdentical = true;
-      }
-    }
-
-    if (isIdentical) {
-      activeSyncStatus.alreadySynced = true;
-    }
-
-    if (records.length > 0 && !isIdentical) {
-      // Save pulled dataset locally to files
+    if (records.length > 0) {
+      // Save pulled dataset locally as secondary backup files
       saveJsonDatabaseSafe(records);
       writeCsvDatabase(records);
 
-      // Update active in-memory cache
+      // Update active in-memory cache from Firestore (Single Source of Truth)
       licensesCache = records;
+      console.log(`[Firebase] In-memory licensesCache updated with ${records.length} records from Firestore.`);
+    } else {
+      console.log("[Firebase] Firestore pulled 0 records.");
     }
 
     // Also pull uploaded lots from Firestore
@@ -385,68 +373,6 @@ async function pullLotsFromFirestore() {
   }
 }
 
-function generateDefaultRecords(count: number, lotCode: string = "LOT-2083-01"): LicenseRecord[] {
-  const firstNames = ["Aashish", "Aabash", "Aabesh", "Aadharsh", "Aaditya", "Anup", "Bishal", "Binod", "Deepak", "Ganesh", "Hari", "Krishna", "Manish", "Niranjan", "Pradip", "Rabin", "Rajesh", "Sagar", "Sajan", "Sandeep", "Santosh", "Siddharth", "Subash", "Vijay"];
-  const lastNames = ["Chaudhary", "Basnet", "Karki", "Rai", "Subedi", "Shrestha", "Khatiwada", "Singh", "Kumar", "Mandal", "Paswan", "Sapkota", "Thapa", "Adhikari", "Bhandari", "Dahal", "Giri"];
-  const categories = ["A", "B", "A, B", "F", "K", "A, B, K"];
-  const days = ["सोमबार", "मङ्गलवार", "बुधवार", "बिहीबार", "शुक्रबार"];
-
-  const records: LicenseRecord[] = [];
-  
-  // Deterministic seeds to guarantee searchable items like 01-02-45986582
-  const presetApplicants = [
-    { fullName: "Ram Bahadur Thapa", licenseNo: "01-02-45986582", applicantId: "5482931" },
-    { fullName: "Sita Kumari Dahal", licenseNo: "03-04-12345678", applicantId: "9876543" },
-    { fullName: "Hari Prasad Shrestha", licenseNo: "05-06-87654321", applicantId: "1234567" },
-  ];
-
-  for (let i = 1; i <= count; i++) {
-    if (i <= presetApplicants.length) {
-      const preset = presetApplicants[i - 1];
-      records.push({
-        sn: String(i),
-        serialNo: String(i),
-        applicantId: preset.applicantId,
-        fullName: preset.fullName,
-        licenseNo: preset.licenseNo,
-        category: "B",
-        oldCode: "133",
-        newCode: "4152",
-        visitDate: "सोमबार",
-        receivedBy: "",
-        lotCode
-      });
-      continue;
-    }
-
-    const fn = firstNames[Math.floor(Math.random() * firstNames.length)];
-    const ln = lastNames[Math.floor(Math.random() * lastNames.length)];
-    const fullName = `${fn} ${ln}`;
-    const applicantId = String(Math.floor(1000000 + Math.random() * 9000000));
-    const p1 = String(Math.floor(1 + Math.random() * 14)).padStart(2, "0");
-    const p2 = String(Math.floor(1 + Math.random() * 14)).padStart(2, "0");
-    const p3 = String(Math.floor(10000000 + Math.random() * 90000000));
-    const licenseNo = `${p1}-${p2}-${p3}`;
-    const category = categories[Math.floor(Math.random() * categories.length)];
-    const visitDate = days[Math.floor(Math.random() * days.length)];
-    
-    records.push({
-      sn: String(i),
-      serialNo: String(i),
-      applicantId,
-      fullName,
-      licenseNo,
-      category,
-      oldCode: Math.random() > 0.5 ? "133" : "",
-      newCode: Math.random() > 0.5 ? "" : "4152",
-      visitDate,
-      receivedBy: "",
-      lotCode
-    });
-  }
-  return records;
-}
-
 function writeCsvDatabase(records: LicenseRecord[]) {
   const csvHeaders = ["SN", "APPLICANT ID", "FULL NAME", "LICENSE NO", "CATEGORY", "OLD CODE", "NEW CODE", "VISIT DATE", "RECEIVED BY"];
   const csvRows = records.map((r) => [
@@ -476,7 +402,7 @@ function loadDatabaseIntoCache() {
       if (Array.isArray(parsed)) {
         licensesCache = parsed.map((r: any) => ({
           ...r,
-          lotCode: r.lotCode || "1st-LOT"
+          lotCode: r.lotCode || ""
         }));
         console.log(`Successfully loaded ${licensesCache.length} licenses in ${Date.now() - startTime}ms.`);
       }
@@ -531,61 +457,6 @@ function rateLimiter(maxRequests: number, windowMs: number) {
 function sanitizeInput(str: string): string {
   return (str || "").replace(/[<>'"\\;]/g, "").trim();
 }
-
-// Initial cache load
-loadDatabaseIntoCache();
-loadUploadedLotsIntoCache();
-
-initFirebase().then((connected) => {
-  if (connected) {
-    // If local cache has records but Firestore is empty, or vice-versa, sync them!
-    const syncOnStartup = async () => {
-      try {
-        const chunksCollection = firestoreDb!.collection("dataset_chunks");
-        const manifestDoc = await chunksCollection.doc("manifest").get();
-        let hasFirestoreData = manifestDoc.exists;
-        
-        if (!hasFirestoreData) {
-          const legacyRef = firestoreDb!.collection("licenses");
-          const legacySnapshot = await legacyRef.limit(1).get();
-          hasFirestoreData = !legacySnapshot.empty;
-        }
-
-        console.log(`[Firebase] Startup sync check: localCache=${licensesCache.length}, hasFirestoreData=${hasFirestoreData}`);
-
-        if (licensesCache.length === 0 && hasFirestoreData) {
-          console.log("[Firebase] Local cache is empty on startup. Automatically pulling remote records from Firestore...");
-          await pullFromFirestore();
-        } else if (licensesCache.length > 0 && !hasFirestoreData) {
-          console.log(`[Firebase] Firestore is empty on startup, but local cache has ${licensesCache.length} records. Automatically backing up to Firestore...`);
-          await pushToFirestoreInBatches(licensesCache);
-        }
-      } catch (err) {
-        console.error("[Firebase] Error in syncOnStartup check:", err);
-      }
-    };
-    
-    syncOnStartup().catch((err) => {
-      console.error("[Firebase] Auto-sync on startup failed:", err);
-    });
-    
-    if (uploadedLotsCache.length === 0) {
-      console.log("[Firebase] Local uploaded lots cache is empty on startup. Automatically pulling from Firestore...");
-      pullLotsFromFirestore().catch((err) => {
-        console.error("[Firebase] Auto-pull of uploaded lots failed on startup:", err);
-      });
-    } else {
-      // Local has lots, make sure Firestore has them too
-      const docRef = firestoreDb!.collection("config").doc("uploaded_lots");
-      docRef.get().then((doc) => {
-        if (!doc.exists) {
-          console.log("[Firebase] Firestore is missing uploaded lots config. Backing up local lots to Firestore...");
-          pushLotsToFirestore();
-        }
-      }).catch(e => console.error("[Firebase] Check uploaded lots on startup failed:", e));
-    }
-  }
-});
 
 // Security Headers Middleware
 app.use((req, res, next) => {
@@ -743,100 +614,12 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
   }
 });
 
-// 2.5. Seed mock data for easy testing
+// 2.5. Seed mock data disabled in production
 app.post("/api/seed", rateLimiter(10, 60000), (req, res) => {
-  try {
-    const { count = "10000" } = req.query;
-    const requestedCount = Math.min(Math.max(parseInt(count as string, 10) || 10000, 100), 200000);
-    
-    console.log(`Generating ${requestedCount} mock license records...`);
-    const startTime = Date.now();
-
-    const firstNames = ["Aashish", "Aabash", "Aabesh", "Aadharsh", "Aaditya", "Anup", "Bishal", "Binod", "Deepak", "Ganesh", "Hari", "Krishna", "Manish", "Niranjan", "Pradip", "Rabin", "Rajesh", "Sagar", "Sajan", "Sandeep", "Santosh", "Siddharth", "Subash", "Vijay", "Aaradhya", "Bimala", "Gita", "Nisha", "Pooja", "Pratima", "Saraswati", "Sita", "Sujata", "Sunita"];
-    const lastNames = ["Chaudhary", "Basnet", "Karki", "Rai", "Subedi", "Shrestha", "Khatiwada", "Singh", "Kumar", "Mandal", "Paswan", "Sapkota", "Thapa", "Adhikari", "Bhandari", "Dahal", "Giri", "Joshi", "Maharjan", "Neupane", "Pandey", "Regmi", "Sharma", "Tamang", "Upreti"];
-    const categories = ["A", "B", "A, B", "F", "G", "K", "A, B, K", "B, K", "A, C1"];
-    const days = ["आइतबार", "सोमबार", "मंगलबार", "बुधबार", "बिहीबार", "शुक्रबार", "शनिबार"]; // Sunday - Saturday in Nepali
-    const firstNamesLen = firstNames.length;
-    const lastNamesLen = lastNames.length;
-    const categoriesLen = categories.length;
-    const daysLen = days.length;
-
-    const lotCode = (req.query.lotCode as string) || `LOT-SEED-${Math.floor(100 + Math.random() * 900)}`;
-    const parsedRecords: LicenseRecord[] = [];
-    
-    for (let i = 1; i <= requestedCount; i++) {
-      const fn = firstNames[Math.floor(Math.random() * firstNamesLen)];
-      const ln = lastNames[Math.floor(Math.random() * lastNamesLen)];
-      const fullName = `${fn} ${ln}`;
-      
-      // Applicant ID: 7 digit random string
-      const applicantId = String(Math.floor(1000000 + Math.random() * 9000000));
-      
-      // License No format: XX-XX-XXXXXXXX
-      const p1 = String(Math.floor(1 + Math.random() * 14)).padStart(2, "0");
-      const p2 = String(Math.floor(1 + Math.random() * 14)).padStart(2, "0");
-      const p3 = String(Math.floor(100000 + Math.random() * 90000000)).padStart(8, "0");
-      const licenseNo = `${p1}-${p2}-${p3}`;
-      
-      const category = categories[Math.floor(Math.random() * categoriesLen)];
-      const oldCode = Math.random() > 0.3 ? "133" : "";
-      const newCode = oldCode ? "" : String(Math.floor(1000 + Math.random() * 9000));
-      const visitDate = days[Math.floor(Math.random() * daysLen)];
-      
-      // 85% available in office, 15% received by someone
-      const isReceived = Math.random() < 0.15;
-      const receivedBy = isReceived ? `${firstNames[Math.floor(Math.random() * firstNamesLen)]} ${lastNames[Math.floor(Math.random() * lastNamesLen)]}` : "";
-
-      parsedRecords.push({
-        sn: String(i),
-        serialNo: String(i),
-        applicantId,
-        fullName,
-        licenseNo,
-        category,
-        oldCode,
-        newCode,
-        visitDate,
-        receivedBy,
-        lotCode
-      });
-    }
-
-    // Save to files
-    saveJsonDatabaseSafe(parsedRecords);
-
-    // Build CSV and save
-    const csvHeaders = ["SN", "APPLICANT ID", "FULL NAME", "LICENSE NO", "CATEGORY", "OLD CODE", "NEW CODE", "VISIT DATE", "RECEIVED BY"];
-    const csvRows = parsedRecords.map((r) => [
-      `"${r.sn}"`,
-      `"${r.applicantId}"`,
-      `"${r.fullName}"`,
-      `"${r.licenseNo}"`,
-      `"${r.category}"`,
-      `"${r.oldCode}"`,
-      `"${r.newCode}"`,
-      `"${r.visitDate}"`,
-      `"${r.receivedBy}"`
-    ].join(","));
-    
-    const csvContent = [csvHeaders.join(","), ...csvRows].join("\n");
-    fs.writeFileSync(CSV_DB_PATH, csvContent, "utf-8");
-
-    licensesCache = parsedRecords;
-    if (fs.existsSync(RESET_FLAG_PATH)) {
-      fs.unlinkSync(RESET_FLAG_PATH);
-    }
-    asyncPushToFirestoreIfConnected(parsedRecords);
-
-    res.json({
-      success: true,
-      message: `Seeded ${requestedCount} mock license records!`,
-      total: requestedCount,
-      timeMs: Date.now() - startTime
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+  res.status(400).json({
+    success: false,
+    error: "Mock data seeding is permanently disabled in production. The system uses only real records."
+  });
 });
 
 // 3. Import CSV/Excel database
@@ -1040,7 +823,16 @@ app.post(
       if (fs.existsSync(RESET_FLAG_PATH)) {
         fs.unlinkSync(RESET_FLAG_PATH);
       }
-      asyncPushToFirestoreIfConnected(finalRecords, method === "overwrite");
+
+      // Write directly to Firestore as Single Source of Truth
+      if (firestoreDb) {
+        console.log(`[Import] Synchronizing ${finalRecords.length} records directly to Firestore as Single Source of Truth...`);
+        if (method === "overwrite") {
+          await clearFirestoreCollection();
+        }
+        await pushToFirestoreInBatches(finalRecords);
+        await pushLotsToFirestore();
+      }
 
       res.json({
         success: true,
@@ -1065,16 +857,31 @@ app.post(
 // ==========================================
 
 // Check the connected Firebase status
-app.get("/api/firebase/status", (req, res) => {
+app.get("/api/firebase/status", async (req, res) => {
   try {
+    if (!firestoreDb) {
+      await initFirebase();
+    }
+
     const configPath = path.join(DATA_DIR, "firebase_config.json");
-    const hasConfig = fs.existsSync(configPath) || (!!process.env.FIREBASE_PROJECT_ID);
+    const rootConfigPath = path.join(process.cwd(), "firebase_config.json");
+    const appletConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+
+    const hasConfig = fs.existsSync(configPath) || 
+                      fs.existsSync(rootConfigPath) || 
+                      fs.existsSync(appletConfigPath) || 
+                      (!!process.env.FIREBASE_PROJECT_ID);
     
     let projectId = "";
     if (fs.existsSync(configPath)) {
       try {
         const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        projectId = config.projectId;
+        projectId = config.projectId || config.project_id || "";
+      } catch (e) {}
+    } else if (fs.existsSync(appletConfigPath)) {
+      try {
+        const config = JSON.parse(fs.readFileSync(appletConfigPath, "utf-8"));
+        projectId = config.projectId || config.project_id || "";
       } catch (e) {}
     } else if (process.env.FIREBASE_PROJECT_ID) {
       projectId = process.env.FIREBASE_PROJECT_ID;
@@ -1154,64 +961,17 @@ app.post("/api/firebase/disconnect", async (req, res) => {
   }
 });
 
-function runSimulatedPushSync(records: LicenseRecord[]) {
-  activeSyncStatus.isSyncing = true;
-  activeSyncStatus.totalRecords = records.length;
-  activeSyncStatus.processedRecords = 0;
-  activeSyncStatus.error = null;
-  activeSyncStatus.operation = "push";
-  activeSyncStatus.startTime = Date.now();
-
-  const total = records.length;
-  const chunk = Math.max(1, Math.ceil(total / 10));
-  let processed = 0;
-
-  const interval = setInterval(() => {
-    if (processed >= total) {
-      clearInterval(interval);
-      activeSyncStatus.isSyncing = false;
-      return;
-    }
-    processed = Math.min(total, processed + chunk);
-    activeSyncStatus.processedRecords = processed;
-  }, 150);
-}
-
-function runSimulatedPullSync() {
-  const targetCount = licensesCache.length;
-  activeSyncStatus.isSyncing = true;
-  activeSyncStatus.totalRecords = targetCount;
-  activeSyncStatus.processedRecords = 0;
-  activeSyncStatus.error = null;
-  activeSyncStatus.operation = "pull";
-  activeSyncStatus.startTime = Date.now();
-  activeSyncStatus.alreadySynced = false;
-
-  const chunk = targetCount > 0 ? Math.ceil(targetCount / 10) : 1;
-  let processed = 0;
-
-  const interval = setInterval(() => {
-    if (processed >= targetCount) {
-      clearInterval(interval);
-      activeSyncStatus.isSyncing = false;
-      activeSyncStatus.alreadySynced = true;
-      return;
-    }
-    processed = Math.min(targetCount, processed + chunk);
-    activeSyncStatus.processedRecords = processed;
-  }, 150);
-}
-
 // Trigger background synchronization: Local Cache -> Firestore
-app.post("/api/firebase/sync/push", (req, res) => {
+app.post("/api/firebase/sync/push", async (req, res) => {
   try {
     if (activeSyncStatus.isSyncing) {
-      return res.status(400).json({ success: false, error: "A synchronization process is already running." });
+      return res.json({ success: false, error: "A synchronization process is already running." });
     }
     if (!firestoreDb) {
-      console.log("[Firebase] Not connected. Running simulated push sync fallback.");
-      runSimulatedPushSync(licensesCache);
-      return res.json({ success: true, message: "Simulated background push synchronization started!" });
+      await initFirebase();
+    }
+    if (!firestoreDb) {
+      return res.json({ success: false, error: "Firebase Admin is not connected. Push sync requires a connected Firestore database." });
     }
 
     // Run asynchronously to not block the server/client response
@@ -1226,15 +986,16 @@ app.post("/api/firebase/sync/push", (req, res) => {
 });
 
 // Trigger background synchronization: Firestore -> Local Cache
-app.post("/api/firebase/sync/pull", (req, res) => {
+app.post("/api/firebase/sync/pull", async (req, res) => {
   try {
     if (activeSyncStatus.isSyncing) {
-      return res.status(400).json({ success: false, error: "A synchronization process is already running." });
+      return res.json({ success: false, error: "A synchronization process is already running." });
     }
     if (!firestoreDb) {
-      console.log("[Firebase] Not connected. Running simulated pull sync fallback.");
-      runSimulatedPullSync();
-      return res.json({ success: true, message: "Simulated background pull synchronization started!" });
+      await initFirebase();
+    }
+    if (!firestoreDb) {
+      return res.json({ success: false, error: "Firebase Admin is not connected. Pull sync requires a connected Firestore database." });
     }
 
     // Run asynchronously to not block the server/client response
@@ -1363,20 +1124,16 @@ app.post("/api/license/reset", rateLimiter(5, 60000), (req, res) => {
   }
 });
 
-// 4.3. Sudden Loss Recovery (Seeding simulation)
-app.post("/api/license/recover", (req, res) => {
+// 4.3. Database Loss Recovery from Firestore
+app.post("/api/license/recover", async (req, res) => {
   try {
-    // If the database has records, do not overwrite unless empty
-    const countToRecover = 21001;
-    const lotCode = (req.query.lotCode as string) || "LOT-RCV-RECOVERED";
-    console.log(`Recovering ${countToRecover} records from virtual backup with lotCode ${lotCode}...`);
+    if (!firestoreDb) {
+      return res.status(400).json({ success: false, error: "Firebase Admin is not connected. Recovery requires an active Firestore database." });
+    }
 
-    const recovered = generateDefaultRecords(countToRecover, lotCode);
-
-    saveJsonDatabaseSafe(recovered);
-    writeCsvDatabase(recovered);
-
-    licensesCache = recovered;
+    console.log("[Recovery] Pulling records from central Firestore database...");
+    await pullFromFirestore();
+    await pullLotsFromFirestore();
 
     if (fs.existsSync(RESET_FLAG_PATH)) {
       fs.unlinkSync(RESET_FLAG_PATH);
@@ -1384,8 +1141,8 @@ app.post("/api/license/recover", (req, res) => {
 
     res.json({
       success: true,
-      message: `Successfully recovered ${countToRecover.toLocaleString()} records from central system backup.`,
-      count: countToRecover
+      message: `Successfully recovered ${licensesCache.length.toLocaleString()} records from central Firestore database.`,
+      count: licensesCache.length
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -1393,7 +1150,7 @@ app.post("/api/license/recover", (req, res) => {
 });
 
 // 4.4. Delete a specific lot of records and recalculate stats
-app.post("/api/license/delete-lot", (req, res) => {
+app.post("/api/license/delete-lot", async (req, res) => {
   try {
     const { lotCode, count } = req.body;
     if (!lotCode) {
@@ -1409,14 +1166,19 @@ app.post("/api/license/delete-lot", (req, res) => {
 
     console.log(`[Database] Successfully deleted ${deletedCount} records matching lotCode: ${lotCode}`);
 
-    // Save back to JSON file
+    // Save back to JSON file (secondary backup)
     saveJsonDatabaseSafe(licensesCache);
 
-    // Save back to CSV file
+    // Save back to CSV file (secondary backup)
     writeCsvDatabase(licensesCache);
 
     // Sync to Firestore if connected
-    asyncPushToFirestoreIfConnected(licensesCache);
+    if (firestoreDb) {
+      console.log(`[Database] Syncing deleted lot changes (${licensesCache.length} remaining) to Firestore...`);
+      await clearFirestoreCollection();
+      await pushToFirestoreInBatches(licensesCache);
+      await pushLotsToFirestore();
+    }
 
     res.json({
       success: true,
@@ -1432,9 +1194,65 @@ app.post("/api/license/delete-lot", (req, res) => {
 
 // 5. Setup Vite dev server middleware or serve production assets
 async function startServer() {
+  console.log("=========================================");
+  console.log(" PLSMS - Central Database Startup Routine ");
+  console.log("=========================================");
+
+  // 1. Load uploaded lots from disk cache first as fallback
+  loadUploadedLotsIntoCache();
+
+  // 2. Initialize Firebase Admin SDK
+  const firebaseConnected = await initFirebase();
+
+  if (firebaseConnected && firestoreDb) {
+    console.log("[Firebase] Firestore Connected successfully.");
+
+    try {
+      // Check if dataset exists in Firestore
+      const chunksCollection = firestoreDb.collection("dataset_chunks");
+      const manifestDoc = await chunksCollection.doc("manifest").get();
+      let hasFirestoreData = manifestDoc.exists;
+
+      if (!hasFirestoreData) {
+        const legacyRef = firestoreDb.collection("licenses");
+        const legacySnapshot = await legacyRef.limit(1).get();
+        hasFirestoreData = !legacySnapshot.empty;
+      }
+
+      if (hasFirestoreData) {
+        console.log("[Firebase] Production dataset found in Firestore. Loading records directly from Firestore into cache...");
+        await pullFromFirestore();
+        await pullLotsFromFirestore();
+        console.log(`[Firebase] Loaded ${licensesCache.length.toLocaleString()} license records from Firestore.`);
+      } else {
+        console.log("[Firebase] Firestore is empty on startup. Checking for local dataset fallback...");
+        loadDatabaseIntoCache();
+        if (licensesCache.length > 0) {
+          console.log(`[Firebase] Migrating ${licensesCache.length.toLocaleString()} local records to Firestore...`);
+          await pushToFirestoreInBatches(licensesCache);
+          await pushLotsToFirestore();
+        }
+      }
+    } catch (err) {
+      console.error("[Firebase] Error reading Firestore on startup:", err);
+      loadDatabaseIntoCache();
+    }
+  } else {
+    console.log("[Firebase] Firestore not connected. Loading local backup database into cache...");
+    loadDatabaseIntoCache();
+  }
+
+  console.log(`[Server] Cache Ready: ${licensesCache.length.toLocaleString()} records active in RAM cache.`);
+  console.log("[Server] Dashboard Ready");
+  console.log("[Server] Search Ready");
+  console.log("[Server] Reports Ready");
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -1447,7 +1265,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`[Server] Server Ready on http://0.0.0.0:${PORT}`);
   });
 }
 

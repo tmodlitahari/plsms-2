@@ -3,6 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function() {
+        function isWsError(msg) {
+          if (!msg) return false;
+          var s = String(msg).toLowerCase();
+          return s.indexOf('websocket') !== -1 || s.indexOf('vite') !== -1;
+        }
+        window.addEventListener('unhandledrejection', function(e) {
+          if (isWsError(e.reason && (e.reason.message || e.reason))) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+        }, true);
+        window.addEventListener('error', function(e) {
+          if (isWsError(e.message || e.error)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+        }, true);
+      })();
+    </script>
     <title>Printed License Search Itahari</title>
   </head>
   <body>
