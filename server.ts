@@ -45,15 +45,41 @@ const UPLOADED_LOTS_PATH = path.join(DATA_DIR, "uploaded_lots.json");
 // In-memory database for lightning fast searching
 let licensesCache: LicenseRecord[] = [];
 let uploadedLotsCache: any[] = [];
+let cachedStats: { total: number; available: number; handedOver: number; categories: Record<string, number> } | null = null;
+
+function recalculateStats() {
+  const total = licensesCache.length;
+  let availableCount = 0;
+  let receivedCount = 0;
+  const categoryCounts: Record<string, number> = {};
+
+  for (let i = 0; i < total; i++) {
+    const rec = licensesCache[i];
+    if (rec.receivedBy && rec.receivedBy.trim() !== "") {
+      receivedCount++;
+    } else {
+      availableCount++;
+    }
+    const cat = (rec.category || "Unknown").trim().toUpperCase();
+    categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+  }
+
+  cachedStats = {
+    total,
+    available: availableCount,
+    handedOver: receivedCount,
+    categories: categoryCounts,
+  };
+}
 
 function saveJsonDatabaseSafe(records: LicenseRecord[]) {
   try {
     const tmpPath = `${JSON_DB_PATH}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(records, null, 2), "utf-8");
+    fs.writeFileSync(tmpPath, JSON.stringify(records), "utf-8");
     fs.renameSync(tmpPath, JSON_DB_PATH);
   } catch (err) {
     console.error("Error saving JSON database safely:", err);
-    fs.writeFileSync(JSON_DB_PATH, JSON.stringify(records, null, 2), "utf-8");
+    fs.writeFileSync(JSON_DB_PATH, JSON.stringify(records), "utf-8");
   }
 }
 
@@ -514,6 +540,7 @@ async function pullFromFirestore() {
 
       // Update active in-memory cache from Firestore (Single Source of Truth)
       licensesCache = records;
+      recalculateStats();
       console.log(`[Firebase] In-memory licensesCache updated with ${records.length} records from Firestore.`);
     } else {
       console.log("[Firebase] Firestore pulled 0 records.");
@@ -641,20 +668,26 @@ async function pullLotsFromFirestore() {
 }
 
 function writeCsvDatabase(records: LicenseRecord[]) {
-  const csvHeaders = ["SN", "APPLICANT ID", "FULL NAME", "LICENSE NO", "CATEGORY", "OLD CODE", "NEW CODE", "VISIT DATE", "RECEIVED BY"];
-  const csvRows = records.map((r) => [
-    `"${(r.sn || "").replace(/"/g, '""')}"`,
-    `"${(r.applicantId || "").replace(/"/g, '""')}"`,
-    `"${(r.fullName || "").replace(/"/g, '""')}"`,
-    `"${(r.licenseNo || "").replace(/"/g, '""')}"`,
-    `"${(r.category || "").replace(/"/g, '""')}"`,
-    `"${(r.oldCode || "").replace(/"/g, '""')}"`,
-    `"${(r.newCode || "").replace(/"/g, '""')}"`,
-    `"${(r.visitDate || "").replace(/"/g, '""')}"`,
-    `"${(r.receivedBy || "").replace(/"/g, '""')}"`
-  ].join(","));
-  const csvContent = [csvHeaders.join(","), ...csvRows].join("\n");
-  fs.writeFileSync(CSV_DB_PATH, csvContent, "utf-8");
+  setImmediate(() => {
+    try {
+      const csvHeaders = ["SN", "APPLICANT ID", "FULL NAME", "LICENSE NO", "CATEGORY", "OLD CODE", "NEW CODE", "VISIT DATE", "RECEIVED BY"];
+      const csvRows = records.map((r) => [
+        `"${(r.sn || "").replace(/"/g, '""')}"`,
+        `"${(r.applicantId || "").replace(/"/g, '""')}"`,
+        `"${(r.fullName || "").replace(/"/g, '""')}"`,
+        `"${(r.licenseNo || "").replace(/"/g, '""')}"`,
+        `"${(r.category || "").replace(/"/g, '""')}"`,
+        `"${(r.oldCode || "").replace(/"/g, '""')}"`,
+        `"${(r.newCode || "").replace(/"/g, '""')}"`,
+        `"${(r.visitDate || "").replace(/"/g, '""')}"`,
+        `"${(r.receivedBy || "").replace(/"/g, '""')}"`
+      ].join(","));
+      const csvContent = [csvHeaders.join(","), ...csvRows].join("\n");
+      fs.writeFile(CSV_DB_PATH, csvContent, "utf-8", () => {});
+    } catch (e) {
+      console.error("Error writing CSV database in background:", e);
+    }
+  });
 }
 
 // Load database into cache on startup
@@ -677,9 +710,11 @@ function loadDatabaseIntoCache() {
       console.log("No existing database found. Initializing empty database.");
       licensesCache = [];
     }
+    recalculateStats();
   } catch (error) {
     console.error("Error reading database file:", error);
     licensesCache = [];
+    recalculateStats();
   }
 }
 
@@ -767,32 +802,12 @@ app.post("/api/uploaded-lots", async (req, res) => {
 // 1. Get statistics for the dashboard
 app.get("/api/stats", (req, res) => {
   try {
-    const total = licensesCache.length;
-    let availableCount = 0;
-    let receivedCount = 0;
-    const categoryCounts: Record<string, number> = {};
-
-    for (let i = 0; i < total; i++) {
-      const rec = licensesCache[i];
-      // If "receivedBy" is empty, it means the license is available in the office for pickup
-      if (rec.receivedBy && rec.receivedBy.trim() !== "") {
-        receivedCount++;
-      } else {
-        availableCount++;
-      }
-
-      const cat = (rec.category || "Unknown").trim().toUpperCase();
-      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+    if (!cachedStats) {
+      recalculateStats();
     }
-
     res.json({
       success: true,
-      stats: {
-        total,
-        available: availableCount,
-        handedOver: receivedCount,
-        categories: categoryCounts,
-      },
+      stats: cachedStats,
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -810,16 +825,28 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
     const limitNum = parseInt(limit as string, 10) || 50;
     const startTime = Date.now();
 
-    // Determine the source collection to query
-    const sourceRecords = showOnlyAvailable 
-      ? licensesCache.filter((r) => !r.receivedBy || r.receivedBy.trim() === "")
-      : licensesCache;
-
     if (!queryStr) {
-      // Return paginated list of the source records when query is empty!
-      const totalMatches = sourceRecords.length;
+      // Fast path when query is empty: slice or iterate without pre-allocating huge arrays
+      let totalMatches = 0;
+      const paginatedMatches: LicenseRecord[] = [];
       const startIndex = (pageNum - 1) * limitNum;
-      const paginatedMatches = sourceRecords.slice(startIndex, startIndex + limitNum);
+      const endIndex = startIndex + limitNum;
+
+      if (showOnlyAvailable) {
+        for (let i = 0; i < licensesCache.length; i++) {
+          const rec = licensesCache[i];
+          if (!rec.receivedBy || rec.receivedBy.trim() === "") {
+            if (totalMatches >= startIndex && totalMatches < endIndex) {
+              paginatedMatches.push(rec);
+            }
+            totalMatches++;
+          }
+        }
+      } else {
+        totalMatches = licensesCache.length;
+        const items = licensesCache.slice(startIndex, endIndex);
+        paginatedMatches.push(...items);
+      }
 
       return res.json({
         success: true,
@@ -836,13 +863,15 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
     const isExact = exact === "true";
     const matches: LicenseRecord[] = [];
 
-    // Highly optimized loop to search through records
-    for (let i = 0; i < sourceRecords.length; i++) {
-      const rec = sourceRecords[i];
+    // Highly optimized zero-allocation loop to search through records
+    for (let i = 0; i < licensesCache.length; i++) {
+      const rec = licensesCache[i];
+      if (showOnlyAvailable && rec.receivedBy && rec.receivedBy.trim() !== "") {
+        continue;
+      }
       
       let isMatch = false;
       if (isExact) {
-        // Enforce exact matches of the entire field (useful for public card inquiries)
         const normAppId = normalizeSearchStr(rec.applicantId);
         const normLicNo = normalizeSearchStr(rec.licenseNo);
         const normName = normalizeSearchStr(rec.fullName);
@@ -851,7 +880,6 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
         const matchName = normQuery.length >= 3 && normName.includes(normQuery);
         isMatch = matchApplicantId || matchLicenseNo || matchName;
       } else {
-        // Partial matches allowed (useful for administrative back-office lookups)
         const matchApplicantId = normalizeSearchStr(rec.applicantId).includes(normQuery);
         const matchLicenseNo = normalizeSearchStr(rec.licenseNo).includes(normQuery);
         const matchFullName = normalizeSearchStr(rec.fullName).includes(normQuery);
@@ -1096,11 +1124,11 @@ app.post(
         `"${(r.receivedBy || "").replace(/"/g, '""')}"`
       ].join(","));
       
-      const csvContent = [csvHeaders.join(","), ...csvRows].join("\n");
-      fs.writeFileSync(CSV_DB_PATH, csvContent, "utf-8");
+      writeCsvDatabase(finalRecords);
 
       // Refresh in-memory cache
       licensesCache = finalRecords;
+      recalculateStats();
       if (fs.existsSync(RESET_FLAG_PATH)) {
         fs.unlinkSync(RESET_FLAG_PATH);
       }
@@ -1387,20 +1415,10 @@ app.post("/api/license/receive", rateLimiter(45, 60000), (req, res) => {
     saveJsonDatabaseSafe(licensesCache);
 
     // Save back to CSV file
-    const csvHeaders = ["SN", "APPLICANT ID", "FULL NAME", "LICENSE NO", "CATEGORY", "OLD CODE", "NEW CODE", "VISIT DATE", "RECEIVED BY"];
-    const csvRows = licensesCache.map((r) => [
-      `"${(r.sn || "").replace(/"/g, '""')}"`,
-      `"${(r.applicantId || "").replace(/"/g, '""')}"`,
-      `"${(r.fullName || "").replace(/"/g, '""')}"`,
-      `"${(r.licenseNo || "").replace(/"/g, '""')}"`,
-      `"${(r.category || "").replace(/"/g, '""')}"`,
-      `"${(r.oldCode || "").replace(/"/g, '""')}"`,
-      `"${(r.newCode || "").replace(/"/g, '""')}"`,
-      `"${(r.visitDate || "").replace(/"/g, '""')}"`,
-      `"${(r.receivedBy || "").replace(/"/g, '""')}"`
-    ].join(","));
-    const csvContent = [csvHeaders.join(","), ...csvRows].join("\n");
-    fs.writeFileSync(CSV_DB_PATH, csvContent, "utf-8");
+    writeCsvDatabase(licensesCache);
+
+    // Recalculate stats cache
+    recalculateStats();
 
     // Async push update to Firestore if connected
     asyncPushToFirestoreIfConnected(licensesCache);
@@ -1421,6 +1439,7 @@ app.post("/api/license/reset", rateLimiter(5, 60000), async (req, res) => {
     console.log("Hard resetting license database...");
     licensesCache = [];
     uploadedLotsCache = [];
+    recalculateStats();
 
     if (fs.existsSync(JSON_DB_PATH)) {
       fs.unlinkSync(JSON_DB_PATH);
@@ -1489,6 +1508,7 @@ app.post("/api/license/delete-lot", async (req, res) => {
     // Keep records that don't match the deleted lotCode
     licensesCache = licensesCache.filter(rec => rec.lotCode !== lotCode);
     const deletedCount = initialCount - licensesCache.length;
+    recalculateStats();
 
     console.log(`[Database] Successfully deleted ${deletedCount} records matching lotCode: ${lotCode}`);
 

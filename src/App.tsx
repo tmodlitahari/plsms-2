@@ -128,11 +128,8 @@ export default function App() {
     const handleLocationChange = () => {
       const path = window.location.pathname.toLowerCase();
       const hash = window.location.hash.toLowerCase();
-      if (path === "/plsms" || path.endsWith("/plsms") || hash.includes("plsms")) {
-        setRoute("admin");
-      } else {
-        setRoute("public");
-      }
+      const targetRoute = (path === "/plsms" || path.endsWith("/plsms") || hash.includes("plsms")) ? "admin" : "public";
+      setRoute((prev) => (prev !== targetRoute ? targetRoute : prev));
     };
 
     window.addEventListener("popstate", handleLocationChange);
