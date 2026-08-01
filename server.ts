@@ -5,6 +5,19 @@ import { createServer as createViteServer } from "vite";
 import * as xlsx from "xlsx";
 import { initializeApp, cert, deleteApp, App } from "firebase-admin/app";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { initializeApp as initWebClientApp } from "firebase/app";
+import { 
+  getFirestore as getWebClientFirestore, 
+  doc as webDoc, 
+  getDoc as webGetDoc, 
+  setDoc as webSetDoc, 
+  deleteDoc as webDeleteDoc, 
+  collection as webCollection, 
+  getDocs as webGetDocs, 
+  query as webQuery, 
+  limit as webLimit, 
+  startAfter as webStartAfter 
+} from "firebase/firestore";
 
 // Define the interface matching the license schema in the image
 interface LicenseRecord {
@@ -98,95 +111,277 @@ let activeSyncStatus = {
   alreadySynced: false,
 };
 
-let firebaseApp: App | null = null;
-let firestoreDb: Firestore | null = null;
+let firebaseApp: any = null;
+let firestoreDb: any = null;
 let firebaseConfigError: string | null = null;
+let activeProjectId = "";
+let activeDatabaseId = "";
 
-// Function to initialize or re-initialize Firebase Admin dynamically
+function createWebFirestoreAdapter(rawWebDb: any) {
+  return {
+    collection(colName: string) {
+      return {
+        doc(docId: string) {
+          const docRef = webDoc(rawWebDb, colName, docId);
+          return {
+            async get() {
+              const snap = await webGetDoc(docRef);
+              return {
+                exists: snap.exists(),
+                data: () => snap.data(),
+                id: snap.id,
+              };
+            },
+            async set(data: any, options?: any) {
+              await webSetDoc(docRef, data, options);
+            },
+            async delete() {
+              await webDeleteDoc(docRef);
+            }
+          };
+        },
+        async get() {
+          const colRef = webCollection(rawWebDb, colName);
+          const snap = await webGetDocs(colRef);
+          return {
+            empty: snap.empty,
+            docs: snap.docs.map(d => ({
+              id: d.id,
+              data: () => d.data(),
+              ref: d.ref
+            }))
+          };
+        },
+        limit(n: number) {
+          return {
+            async get() {
+              const colRef = webCollection(rawWebDb, colName);
+              const q = webQuery(colRef, webLimit(n));
+              const snap = await webGetDocs(q);
+              return {
+                empty: snap.empty,
+                docs: snap.docs.map(d => ({
+                  id: d.id,
+                  data: () => d.data(),
+                  ref: d.ref
+                }))
+              };
+            },
+            startAfter(lastDocWrapper: any) {
+              return {
+                limit(n2: number) {
+                  return {
+                    async get() {
+                      const colRef = webCollection(rawWebDb, colName);
+                      const q = webQuery(colRef, webStartAfter(lastDocWrapper.ref), webLimit(n2));
+                      const snap = await webGetDocs(q);
+                      return {
+                        empty: snap.empty,
+                        docs: snap.docs.map(d => ({
+                          id: d.id,
+                          data: () => d.data(),
+                          ref: d.ref
+                        }))
+                      };
+                    }
+                  };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
+// Function to initialize or re-initialize Firebase dynamically
 async function initFirebase(): Promise<boolean> {
   try {
-    let projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
-    let clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+    let projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.FIREBASE_PROJECT || process.env.VITE_FIREBASE_PROJECT_ID;
+    let clientEmail = process.env.FIREBASE_CLIENT_EMAIL || process.env.CLIENT_EMAIL || process.env.GCP_CLIENT_EMAIL;
+    let privateKey = process.env.FIREBASE_PRIVATE_KEY || process.env.PRIVATE_KEY || process.env.GCP_PRIVATE_KEY;
+    let databaseId: string | undefined = process.env.FIREBASE_DATABASE_ID || process.env.FIRESTORE_DATABASE_ID || process.env.DATABASE_ID || process.env.VITE_FIREBASE_DATABASE_ID;
+    let apiKey = process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY;
+    let authDomain = process.env.FIREBASE_AUTH_DOMAIN;
+    let appId = process.env.FIREBASE_APP_ID;
+
+    // Check for raw JSON string or JSON file in credential environment variables
+    const jsonEnvVars = [
+      process.env.FIREBASE_SERVICE_ACCOUNT_KEY,
+      process.env.FIREBASE_SERVICE_ACCOUNT,
+      process.env.FIREBASE_CONFIG,
+      process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    ];
+
+    for (const rawVal of jsonEnvVars) {
+      if (!rawVal) continue;
+      const trimmed = rawVal.trim();
+      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          projectId = parsed.project_id || parsed.projectId || projectId;
+          clientEmail = parsed.client_email || parsed.clientEmail || clientEmail;
+          privateKey = parsed.private_key || parsed.privateKey || privateKey;
+          databaseId = parsed.database_id || parsed.firestoreDatabaseId || parsed.databaseId || databaseId;
+          apiKey = parsed.apiKey || parsed.api_key || apiKey;
+          authDomain = parsed.authDomain || authDomain;
+          appId = parsed.appId || appId;
+        } catch (e) {
+          console.error("Error parsing JSON credential environment variable:", e);
+        }
+      } else if (fs.existsSync(trimmed)) {
+        try {
+          const fileContent = fs.readFileSync(trimmed, "utf-8");
+          const parsed = JSON.parse(fileContent);
+          projectId = parsed.project_id || parsed.projectId || projectId;
+          clientEmail = parsed.client_email || parsed.clientEmail || clientEmail;
+          privateKey = parsed.private_key || parsed.privateKey || privateKey;
+          databaseId = parsed.database_id || parsed.firestoreDatabaseId || parsed.databaseId || databaseId;
+          apiKey = parsed.apiKey || parsed.api_key || apiKey;
+          authDomain = parsed.authDomain || authDomain;
+          appId = parsed.appId || appId;
+        } catch (e) {
+          console.error(`Error parsing JSON credential file from ${trimmed}:`, e);
+        }
+      }
+    }
 
     // Load from json config files if existing
     const configPath = path.join(DATA_DIR, "firebase_config.json");
     const rootConfigPath = path.join(process.cwd(), "firebase_config.json");
     const appletConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-    
-    const activeConfigPath = fs.existsSync(configPath) 
-      ? configPath 
-      : (fs.existsSync(rootConfigPath) 
-        ? rootConfigPath 
-        : (fs.existsSync(appletConfigPath) ? appletConfigPath : null));
+    const dataAppletConfigPath = path.join(DATA_DIR, "firebase-applet-config.json");
 
-    let databaseId: string | undefined = process.env.FIREBASE_DATABASE_ID;
+    const configCandidates = [configPath, rootConfigPath, appletConfigPath, dataAppletConfigPath];
 
-    if (activeConfigPath) {
-      try {
-        const config = JSON.parse(fs.readFileSync(activeConfigPath, "utf-8"));
-        projectId = config.projectId || config.project_id || projectId;
-        clientEmail = config.clientEmail || config.client_email || clientEmail;
-        privateKey = config.privateKey || config.private_key || privateKey;
-        databaseId = config.firestoreDatabaseId || config.databaseId || config.database_id || databaseId;
-      } catch (e) {
-        console.error("Error reading Firebase config file:", e);
+    for (const cPath of configCandidates) {
+      if (fs.existsSync(cPath)) {
+        try {
+          const config = JSON.parse(fs.readFileSync(cPath, "utf-8"));
+          projectId = config.projectId || config.project_id || projectId;
+          clientEmail = config.clientEmail || config.client_email || clientEmail;
+          privateKey = config.privateKey || config.private_key || privateKey;
+          databaseId = config.firestoreDatabaseId || config.databaseId || config.database_id || databaseId;
+          apiKey = config.apiKey || config.api_key || apiKey;
+          authDomain = config.authDomain || authDomain;
+          appId = config.appId || appId;
+        } catch (e) {
+          console.error(`Error reading Firebase config file at ${cPath}:`, e);
+        }
       }
     }
 
     if (!projectId) {
       firebaseApp = null;
       firestoreDb = null;
-      firebaseConfigError = "Firebase project ID not found. Please submit credentials in the Admin panel.";
+      activeProjectId = "";
+      activeDatabaseId = "";
+      firebaseConfigError = "Missing required Firebase configuration: FIREBASE_PROJECT_ID.";
+      console.error(`[Firebase] Initialization Failed: ${firebaseConfigError}`);
       return false;
     }
+
+    activeProjectId = projectId;
+    activeDatabaseId = databaseId || "";
 
     // Clean up existing app instance to prevent duplicate app errors
     if (firebaseApp) {
       try {
-        await deleteApp(firebaseApp);
+        if (typeof firebaseApp.delete === "function") {
+          await firebaseApp.delete();
+        } else {
+          await deleteApp(firebaseApp);
+        }
       } catch (e) {}
     }
 
+    // 1. Attempt Firebase Admin SDK if service account credentials exist
     if (clientEmail && privateKey) {
-      // Clean private key formatting
-      let cleanedPrivateKey = privateKey.trim();
-      if ((cleanedPrivateKey.startsWith('"') && cleanedPrivateKey.endsWith('"')) || 
-          (cleanedPrivateKey.startsWith("'") && cleanedPrivateKey.endsWith("'"))) {
-        cleanedPrivateKey = cleanedPrivateKey.slice(1, -1).trim();
-      }
-      
-      cleanedPrivateKey = cleanedPrivateKey.replace(/\\n/g, "\n");
-      cleanedPrivateKey = cleanedPrivateKey.replace(/\\r/g, "\r");
-      cleanedPrivateKey = cleanedPrivateKey.replace(/\\"/g, '"');
-      cleanedPrivateKey = cleanedPrivateKey.replace(/\\'/g, "'");
+      try {
+        let cleanedPrivateKey = privateKey.trim();
+        if ((cleanedPrivateKey.startsWith('"') && cleanedPrivateKey.endsWith('"')) || 
+            (cleanedPrivateKey.startsWith("'") && cleanedPrivateKey.endsWith("'"))) {
+          cleanedPrivateKey = cleanedPrivateKey.slice(1, -1).trim();
+        }
+        cleanedPrivateKey = cleanedPrivateKey.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\"/g, '"').replace(/\\'/g, "'");
 
-      if (cleanedPrivateKey && !cleanedPrivateKey.includes("-----BEGIN PRIVATE KEY-----")) {
-        cleanedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${cleanedPrivateKey}\n-----END PRIVATE KEY-----`;
-      }
+        if (!cleanedPrivateKey.includes("-----BEGIN PRIVATE KEY-----")) {
+          cleanedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${cleanedPrivateKey}\n-----END PRIVATE KEY-----`;
+        }
 
-      firebaseApp = initializeApp({
-        credential: cert({
+        const adminApp = initializeApp({
+          credential: cert({
+            projectId,
+            clientEmail,
+            privateKey: cleanedPrivateKey,
+          })
+        }, "nepal-license-central-db-admin");
+
+        const adminDb = databaseId ? getFirestore(adminApp, databaseId) : getFirestore(adminApp);
+        await adminDb.collection("dataset_chunks").doc("manifest").get();
+
+        firebaseApp = adminApp;
+        firestoreDb = adminDb;
+        firebaseConfigError = null;
+        console.log("=========================================");
+        console.log("[Firebase] Firebase Admin initialized");
+        console.log("[Firebase] Firestore connected");
+        console.log(`[Firebase] Project ID: ${projectId}`);
+        if (databaseId) console.log(`[Firebase] Database ID: ${databaseId}`);
+        console.log("=========================================");
+        return true;
+      } catch (adminErr: any) {
+        console.warn("[Firebase] Admin SDK init failed, trying Web SDK fallback:", adminErr.message || adminErr);
+      }
+    }
+
+    // 2. Fallback to Firebase Web Client SDK with apiKey (from firebase-applet-config.json)
+    if (apiKey) {
+      try {
+        const webApp = initWebClientApp({
           projectId,
-          clientEmail,
-          privateKey: cleanedPrivateKey,
-        })
-      }, "nepal-license-central-db");
-    } else {
-      // Default application credentials / project initialization
-      firebaseApp = initializeApp({ projectId }, "nepal-license-central-db");
+          apiKey,
+          authDomain,
+          appId,
+        }, "nepal-license-central-db-web");
+
+        const rawWebDb = getWebClientFirestore(webApp, databaseId || undefined);
+        const adapterDb = createWebFirestoreAdapter(rawWebDb);
+        await adapterDb.collection("dataset_chunks").doc("manifest").get();
+
+        firebaseApp = webApp;
+        firestoreDb = adapterDb;
+        firebaseConfigError = null;
+        console.log("=========================================");
+        console.log("[Firebase] Firebase initialized");
+        console.log("[Firebase] Firestore connected");
+        console.log(`[Firebase] Project ID: ${projectId}`);
+        if (databaseId) console.log(`[Firebase] Database ID: ${databaseId}`);
+        console.log("=========================================");
+        return true;
+      } catch (webErr: any) {
+        const errMsg = webErr.message || String(webErr);
+        console.error(`[Firebase] Firestore Web SDK connection failed: ${errMsg}`);
+        firebaseConfigError = `Firestore connection failed: ${errMsg}`;
+        firestoreDb = null;
+        return false;
+      }
     }
 
-    if (databaseId) {
-      firestoreDb = getFirestore(firebaseApp, databaseId);
-    } else {
-      firestoreDb = getFirestore(firebaseApp);
-    }
-    firebaseConfigError = null;
-    console.log(`[Firebase] Admin initialized successfully for project: ${projectId}`);
-    return true;
+    // Diagnostic missing item reporting
+    const missingItems: string[] = [];
+    if (!projectId) missingItems.push("FIREBASE_PROJECT_ID");
+    if (!clientEmail) missingItems.push("FIREBASE_CLIENT_EMAIL");
+    if (!privateKey) missingItems.push("FIREBASE_PRIVATE_KEY");
+    if (!apiKey) missingItems.push("FIREBASE_API_KEY");
+
+    firebaseConfigError = `Missing required Firebase configuration: ${missingItems.join(", ")}. Checked env vars (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY) and config files (firebase-applet-config.json, firebase_config.json).`;
+    console.error(`[Firebase] Initialization Failed: ${firebaseConfigError}`);
+    firestoreDb = null;
+    return false;
   } catch (error: any) {
-    console.error("[Firebase] Initialization failed:", error);
+    console.error("[Firebase] Initialization error:", error);
     firebaseApp = null;
     firestoreDb = null;
     firebaseConfigError = error.message || String(error);
@@ -361,14 +556,16 @@ async function clearFirestoreCollection() {
     console.log("[Firebase] Clearing chunked dataset and uploaded lots in Firestore...");
     const chunksCollection = firestoreDb.collection("dataset_chunks");
     const manifestDoc = await chunksCollection.doc("manifest").get();
+    let chunkCount = 0;
     if (manifestDoc.exists) {
       const manifest = manifestDoc.data();
-      const chunkCount = manifest?.chunkCount || 0;
-      for (let c = 0; c < chunkCount; c++) {
-        await chunksCollection.doc(`chunk_${c}`).delete().catch(() => {});
-      }
-      await chunksCollection.doc("manifest").delete().catch(() => {});
+      chunkCount = manifest?.chunkCount || 0;
     }
+    const maxChunksToDelete = Math.max(chunkCount, 50);
+    for (let c = 0; c < maxChunksToDelete; c++) {
+      await chunksCollection.doc(`chunk_${c}`).delete().catch(() => {});
+    }
+    await chunksCollection.doc("manifest").delete().catch(() => {});
     console.log("[Firebase] Successfully cleared dataset_chunks in Firestore.");
   } catch (err) {
     console.error("[Firebase] Error clearing dataset_chunks:", err);
@@ -980,27 +1177,34 @@ app.get("/api/firebase/status", async (req, res) => {
     const hasConfig = fs.existsSync(configPath) || 
                       fs.existsSync(rootConfigPath) || 
                       fs.existsSync(appletConfigPath) || 
-                      (!!process.env.FIREBASE_PROJECT_ID);
+                      (!!process.env.FIREBASE_PROJECT_ID) ||
+                      (!!process.env.GCP_PROJECT) ||
+                      (!!process.env.GOOGLE_CLOUD_PROJECT) ||
+                      (!!process.env.FIREBASE_CONFIG) ||
+                      (!!process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
     
-    let projectId = "";
-    if (fs.existsSync(configPath)) {
-      try {
-        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        projectId = config.projectId || config.project_id || "";
-      } catch (e) {}
-    } else if (fs.existsSync(appletConfigPath)) {
-      try {
-        const config = JSON.parse(fs.readFileSync(appletConfigPath, "utf-8"));
-        projectId = config.projectId || config.project_id || "";
-      } catch (e) {}
-    } else if (process.env.FIREBASE_PROJECT_ID) {
-      projectId = process.env.FIREBASE_PROJECT_ID;
+    let projectId = activeProjectId;
+    if (!projectId) {
+      if (fs.existsSync(configPath)) {
+        try {
+          const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+          projectId = config.projectId || config.project_id || "";
+        } catch (e) {}
+      } else if (fs.existsSync(appletConfigPath)) {
+        try {
+          const config = JSON.parse(fs.readFileSync(appletConfigPath, "utf-8"));
+          projectId = config.projectId || config.project_id || "";
+        } catch (e) {}
+      } else {
+        projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "";
+      }
     }
 
     res.json({
       success: true,
       connected: !!firestoreDb,
       projectId,
+      databaseId: activeDatabaseId || "",
       hasConfig,
       error: firebaseConfigError,
     });
@@ -1200,7 +1404,7 @@ app.post("/api/license/receive", rateLimiter(45, 60000), (req, res) => {
 });
 
 // 4.2. Hard Reset database (Clear all records)
-app.post("/api/license/reset", rateLimiter(5, 60000), (req, res) => {
+app.post("/api/license/reset", rateLimiter(5, 60000), async (req, res) => {
   try {
     console.log("Hard resetting license database...");
     licensesCache = [];
@@ -1221,8 +1425,8 @@ app.post("/api/license/reset", rateLimiter(5, 60000), (req, res) => {
 
     // Sync clear to Firestore if connected
     if (firestoreDb) {
-      clearFirestoreCollection().catch(e => console.error("[Firebase] Async clearFirestoreCollection failed:", e));
-      pushLotsToFirestore().catch(e => console.error("[Firebase] Async pushLotsToFirestore failed:", e));
+      await clearFirestoreCollection();
+      await pushLotsToFirestore();
     }
 
     res.json({
@@ -1342,8 +1546,6 @@ async function startServer() {
     try {
       const firebaseConnected = await initFirebase();
       if (firebaseConnected && firestoreDb) {
-        console.log("[Firebase] Firestore Connected successfully.");
-
         // Check if dataset exists in Firestore
         const chunksCollection = firestoreDb.collection("dataset_chunks");
         const manifestDoc = await chunksCollection.doc("manifest").get();
@@ -1359,7 +1561,7 @@ async function startServer() {
           console.log("[Firebase] Production dataset found in Firestore. Loading records directly from Firestore into cache...");
           await pullFromFirestore();
           await pullLotsFromFirestore();
-          console.log(`[Firebase] Loaded ${licensesCache.length.toLocaleString()} license records from Firestore.`);
+          console.log(`Loaded ${licensesCache.length.toLocaleString()} license records from Firestore.`);
         } else {
           console.log("[Firebase] Firestore is empty on startup. Checking for local dataset fallback...");
           if (licensesCache.length > 0) {
@@ -1369,7 +1571,7 @@ async function startServer() {
           }
         }
       } else {
-        console.log("[Firebase] Firestore not connected. Using local backup database.");
+        console.error(`[Firebase] Connection Error: ${firebaseConfigError || "Firestore is not connected."}`);
       }
     } catch (err) {
       console.error("[Firebase] Error during background Firestore startup sync:", err);
