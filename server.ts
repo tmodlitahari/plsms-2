@@ -408,7 +408,7 @@ async function pushToFirestoreInBatches(records: LicenseRecord[]) {
     console.log(`[Firebase] Starting chunked backup of ${records.length} records to Firestore...`);
     
     // Chunked storage in dataset_chunks collection for instant, 100% reliable backup
-    const CHUNK_SIZE = 3000;
+    const CHUNK_SIZE = 1000;
     const totalChunks = Math.ceil(records.length / CHUNK_SIZE);
     const chunksCollection = firestoreDb.collection("dataset_chunks");
     
@@ -1134,11 +1134,18 @@ app.post(
       // Write directly to Firestore as Single Source of Truth
       if (firestoreDb) {
         console.log(`[Import] Synchronizing ${finalRecords.length} records directly to Firestore as Single Source of Truth...`);
-        if (method === "overwrite") {
-          await clearFirestoreCollection();
-        }
-        await pushToFirestoreInBatches(finalRecords);
-        await pushLotsToFirestore();
+        // Immediately persist uploaded lots metadata to Firestore
+        await pushLotsToFirestore().catch(e => console.error("[Import] pushLotsToFirestore error:", e));
+
+        // Asynchronously push chunks in background so HTTP response returns valid JSON immediately without timing out
+        const runBackgroundImportSync = async () => {
+          if (method === "overwrite") {
+            await clearFirestoreCollection();
+          }
+          await pushToFirestoreInBatches(finalRecords);
+          await pushLotsToFirestore();
+        };
+        runBackgroundImportSync().catch(e => console.error("[Import] Background Firestore import sync error:", e));
       }
 
       res.json({
@@ -1154,7 +1161,12 @@ app.post(
       });
     } catch (error: any) {
       console.error("Error importing data:", error);
-      res.status(500).json({ success: false, error: error.message });
+      res.status(500).json({ 
+        success: false, 
+        error: error.message || String(error),
+        message: error.message || String(error),
+        stack: process.env.NODE_ENV !== "production" ? error.stack : undefined 
+      });
     }
   }
 );
