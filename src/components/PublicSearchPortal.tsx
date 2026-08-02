@@ -61,7 +61,7 @@ export default function PublicSearchPortal({
 
   React.useEffect(() => {
     QRCode.toDataURL(
-      "https://tmodl-sunsari.onrender.com/",
+      "https://license-search-sunsari.onrender.com/plsms",
       {
         width: 320,
         margin: 1,
@@ -81,7 +81,7 @@ export default function PublicSearchPortal({
   }, []);
 
   const handleCopyLink = () => {
-    navigator.clipboard.writeText("https://tmodl-sunsari.onrender.com/");
+    navigator.clipboard.writeText("https://license-search-sunsari.onrender.com/plsms");
     setIsCopied(true);
     setTimeout(() => {
       setIsCopied(false);
@@ -189,7 +189,7 @@ export default function PublicSearchPortal({
               <h1>Printed License Search Management System (PLSMS)</h1>
               <h2>Transport Management Office</h2>
               <p>Itahari, Sunsari</p>
-              <div class="url-box">https://tmodl-sunsari.onrender.com/</div>
+              <div class="url-box">https://license-search-sunsari.onrender.com/plsms</div>
             </div>
             <script>
               window.onload = function() {
@@ -707,7 +707,7 @@ export default function PublicSearchPortal({
               </div>
 
               {/* Smart QR Code Container */}
-              <div className="border-2 border-dashed border-blue-700 rounded-2xl p-3.5 bg-white flex items-center justify-center shadow-xs mb-4">
+              <div className="border-2 border-dashed border-blue-700 rounded-2xl p-3.5 bg-white flex items-center justify-center shadow-xs mb-3">
                 {qrUrl ? (
                   <img src={qrUrl} alt="PLSMS QR Code" className="w-48 h-48 object-contain" referrerPolicy="no-referrer" />
                 ) : (
@@ -718,71 +718,64 @@ export default function PublicSearchPortal({
               </div>
 
               {/* Title of System */}
-              <h4 className="text-[#20409a] font-black text-[11px] uppercase tracking-wide px-2 leading-normal font-sans">
+              <h4 className="text-[#20409a] font-black text-[10px] uppercase tracking-wide px-1 leading-normal font-sans whitespace-nowrap overflow-hidden text-ellipsis">
                 Printed License Search Management System (PLSMS)
               </h4>
 
-              {/* Sub-office reference */}
-              <p className="text-[10px] font-bold text-slate-700 mt-1 font-sans">
-                Transport Management Office
-              </p>
-              <p className="text-[9px] font-semibold text-slate-400 mt-0.5 font-sans">
-                Itahari, Sunsari
-              </p>
-
               {/* Website Link Box */}
-              <div className="bg-[#ebf2ff] border border-blue-200 rounded-lg py-2 px-3 text-center text-blue-700 text-xs font-mono font-bold max-w-[280px] w-full truncate select-all mt-4 flex items-center justify-center shadow-2xs">
-                https://tmodl-sunsari.onrender.com/
+              <div className="bg-[#ebf2ff] border border-blue-200 rounded-lg py-2 px-3 text-center text-blue-700 text-xs font-mono font-bold max-w-[280px] w-full truncate select-all mt-3 flex items-center justify-center shadow-2xs">
+                https://license-search-sunsari.onrender.com/plsms
               </div>
 
             </div>
 
             {/* Footer / Buttons Section */}
-            <div className="bg-slate-50 border-t border-slate-100 p-4 space-y-2.5">
+            <div className="bg-slate-50 border-t border-slate-100 p-4 space-y-2">
               
               {/* Row 1: Side by Side Download / Print */}
               <div className="flex gap-2 w-full">
                 <button
                   onClick={handleDownloadPng}
-                  className="bg-[#20409a] hover:bg-blue-800 text-white font-bold text-[11px] py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 w-1/2 cursor-pointer transition-all shadow-xs active:scale-98 focus:outline-none"
+                  className="bg-[#20409a] hover:bg-blue-800 text-white font-bold text-[11px] py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 w-1/2 cursor-pointer transition-all shadow-xs active:scale-98 focus:outline-none"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download PNG</span>
+                  <span className="whitespace-nowrap">Download PNG</span>
                 </button>
                 <button
                   onClick={handlePrintQr}
-                  className="bg-[#dc2626] hover:bg-red-700 text-white font-bold text-[11px] py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 w-1/2 cursor-pointer transition-all shadow-xs active:scale-98 focus:outline-none"
+                  className="bg-[#dc2626] hover:bg-red-700 text-white font-bold text-[11px] py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 w-1/2 cursor-pointer transition-all shadow-xs active:scale-98 focus:outline-none"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>Print QR</span>
+                  <span className="whitespace-nowrap">Print QR</span>
                 </button>
               </div>
 
-              {/* Row 2: Copy Website Link */}
-              <button
-                onClick={handleCopyLink}
-                className="bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold text-[11px] py-2.5 w-full rounded-xl flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-2xs active:scale-99 focus:outline-none"
-              >
-                {isCopied ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600 animate-bounce" />
-                    <span className="text-emerald-600">Copied Link!</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy Website Link</span>
-                  </>
-                )}
-              </button>
+              {/* Row 2: Copy Website Link and Close */}
+              <div className="flex gap-2 w-full">
+                <button
+                  onClick={handleCopyLink}
+                  className="bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold text-[11px] py-2.5 px-2 rounded-xl flex items-center justify-center gap-1.5 w-1/2 cursor-pointer transition-all shadow-2xs active:scale-99 focus:outline-none"
+                >
+                  {isCopied ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-600 animate-bounce" />
+                      <span className="text-emerald-600 whitespace-nowrap">Copied Link!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 shrink-0" />
+                      <span className="whitespace-nowrap">Copy Website Link</span>
+                    </>
+                  )}
+                </button>
 
-              {/* Row 3: Close Button */}
-              <button
-                onClick={() => setIsQrModalOpen(false)}
-                className="bg-[#64748b] hover:bg-slate-600 text-white font-bold text-[11px] py-2.5 w-full rounded-xl flex items-center justify-center cursor-pointer transition-all shadow-xs active:scale-99 focus:outline-none"
-              >
-                Close
-              </button>
+                <button
+                  onClick={() => setIsQrModalOpen(false)}
+                  className="bg-[#64748b] hover:bg-slate-600 text-white font-bold text-[11px] py-2.5 px-2 rounded-xl flex items-center justify-center w-1/2 cursor-pointer transition-all shadow-xs active:scale-99 focus:outline-none"
+                >
+                  Close
+                </button>
+              </div>
 
             </div>
 
