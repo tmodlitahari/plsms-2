@@ -348,10 +348,10 @@ export default function PublicSearchPortal({
         </div>
 
         {/* Core Card Section */}
-        <div className="p-4 md:p-8 space-y-5 md:space-y-6">
+        <div className="p-3 md:p-8 space-y-4 md:space-y-6">
           
           {/* Yellow Notice Box */}
-          <div className="bg-[#FFFDF0] border border-[#FFE899] rounded-xl p-3.5 flex items-start gap-2.5 text-left shadow-2xs">
+          <div className="bg-[#FFFDF0] border border-[#FFE899] rounded-xl p-3 md:p-3.5 flex items-start gap-2.5 text-left shadow-2xs">
             <span className="text-sm md:text-base shrink-0 hidden sm:inline-block">💡</span>
             <p className="text-[9px] min-[360px]:text-[10px] min-[400px]:text-[11.5px] sm:text-xs md:text-sm text-[#8A6D3B] font-semibold leading-normal sm:leading-relaxed font-sans w-full">
               यस कार्यालयबाट नवीकरण (Renewal), नयाँ (New License), वर्ग थप (Category Add) तथा प्रतिलिपि (Duplicate) वापतको सेवा लिएका कार्डहरू मात्र यहाँबाट खोज्नुहोला।
@@ -359,14 +359,19 @@ export default function PublicSearchPortal({
           </div>
 
           {/* Input & Form */}
-          <form onSubmit={handleLocalSubmit} className="space-y-4 text-center">
-            <div className="space-y-3 max-w-xl md:max-w-3xl mx-auto">
-              <label className="block text-center text-[10px] sm:text-xs font-black text-slate-500 uppercase tracking-widest px-0.5">
-                लाइसेन्स नम्बर प्रविष्ट गर्नुहोस् ENTER LICENSE NO: XX-XX-XXXXXXXX
+          <form onSubmit={handleLocalSubmit} className="space-y-3 md:space-y-4 text-center">
+            <div className="space-y-2 md:space-y-3 max-w-xl md:max-w-3xl mx-auto">
+              <label className="block text-center font-black uppercase tracking-widest px-0.5">
+                <span className="hidden md:inline text-xs text-slate-500">
+                  लाइसेन्स नम्बर प्रविष्ट गर्नुहोस् ENTER LICENSE NO: XX-XX-XXXXXXXX
+                </span>
+                <span className="inline md:hidden text-[10px] min-[360px]:text-[11px] text-[#20409a]">
+                  ENTER LICENSE NO: XX-XX-XXXXXXXX
+                </span>
               </label>
               
-              <div className="flex flex-col md:flex-row gap-3 items-stretch">
-                <div className="relative flex-1">
+              <div className="flex flex-row md:flex-row gap-2 md:gap-3 items-center md:items-stretch">
+                <div className="relative flex-1 min-w-0">
                   <input
                     ref={publicInputRef}
                     type="text"
@@ -377,7 +382,7 @@ export default function PublicSearchPortal({
                     autoComplete="off"
                     autoCorrect="off"
                     spellCheck={false}
-                    className="w-full px-4 py-3 bg-white border-2 border-slate-300 focus:border-[#20409a] rounded-lg shadow-inner text-base md:text-lg font-bold font-mono tracking-widest text-center md:text-left focus:outline-none focus:ring-4 focus:ring-blue-100 text-slate-800 placeholder-slate-300"
+                    className="w-full px-3 py-2.5 md:px-4 md:py-3 bg-white border-2 border-slate-300 focus:border-[#20409a] rounded-lg shadow-inner text-sm md:text-lg font-bold font-mono tracking-wider md:tracking-widest text-center md:text-left focus:outline-none focus:ring-4 focus:ring-blue-100 text-slate-800 placeholder-slate-300 h-10 md:h-auto"
                   />
                   {searchQueryInput && (
                     <button
@@ -386,25 +391,25 @@ export default function PublicSearchPortal({
                         setSearchQueryInput("");
                         setValidationError(null);
                       }}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
                     >
-                      <XCircle className="w-5 h-5" />
+                      <XCircle className="w-4 h-4 md:w-5 md:h-5" />
                     </button>
                   )}
                 </div>
                 
-                <div className="grid grid-cols-2 md:flex gap-3 shrink-0">
+                <div className="flex gap-2 shrink-0">
                   <button
                     type="submit"
-                    className="flex items-center justify-center gap-2 bg-[#20409a] hover:bg-[#152e72] text-white font-black text-xs md:text-sm px-6 py-3 md:py-3.5 rounded-lg shadow-md uppercase transition-all tracking-wider md:min-w-[130px]"
+                    className="flex items-center justify-center gap-1.5 md:gap-2 bg-[#20409a] hover:bg-[#152e72] text-white font-black text-xs md:text-sm px-3.5 md:px-6 py-2.5 md:py-3.5 rounded-lg shadow-md uppercase transition-all tracking-wider shrink-0 h-10 md:h-auto whitespace-nowrap md:min-w-[130px]"
                   >
-                    <Search className="w-4 h-4 shrink-0" />
+                    <Search className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
                     SEARCH
                   </button>
                   <button
                     type="button"
                     onClick={handleLocalReset}
-                    className="flex items-center justify-center bg-[#6c757d] hover:bg-[#545b62] text-white font-black text-xs md:text-sm px-6 py-3 md:py-3.5 rounded-lg shadow-md uppercase transition-all tracking-wider md:min-w-[100px]"
+                    className="hidden md:flex items-center justify-center bg-[#6c757d] hover:bg-[#545b62] text-white font-black text-xs md:text-sm px-6 py-3.5 rounded-lg shadow-md uppercase transition-all tracking-wider md:min-w-[100px]"
                   >
                     RESET
                   </button>
@@ -412,7 +417,7 @@ export default function PublicSearchPortal({
               </div>
 
               {validationError && (
-                <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-2.5 rounded-lg text-xs font-bold flex items-center gap-2 mt-2">
+                <div className="bg-red-50 border border-red-200 text-red-800 px-3 md:px-4 py-2 md:py-2.5 rounded-lg text-[11px] md:text-xs font-bold flex items-center gap-2 mt-1.5 md:mt-2">
                   <span className="shrink-0 bg-red-600 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-black">✕</span>
                   <span>{validationError}</span>
                 </div>
@@ -423,17 +428,17 @@ export default function PublicSearchPortal({
           {/* Dynamic Query Result Panel - Single Reusable Container */}
           {(renderQuery || isSearching || animState === "loading" || animState === "fading-out") && (
             <div 
-              className={`pt-2 text-left transition-all duration-200 ease-in-out ${
+              className={`pt-1 md:pt-2 text-left transition-all duration-200 ease-in-out ${
                 animState === "fading-out" || animState === "loading"
                   ? "opacity-0 scale-98 pointer-events-none"
                   : "opacity-100 scale-100"
               }`}
             >
               {isSearching || animState === "loading" ? (
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-8 flex flex-col items-center justify-center text-center animate-pulse">
-                  <RefreshCw className="w-8 h-8 text-[#20409a] animate-spin mb-3" />
-                  <p className="text-sm font-bold text-slate-800"> DMV डाटाबेसमा खोज्दैछ...</p>
-                  <p className="text-xs text-slate-400 mt-1">Please wait while we query the records.</p>
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 md:p-8 flex flex-col items-center justify-center text-center animate-pulse">
+                  <RefreshCw className="w-7 h-7 md:w-8 md:h-8 text-[#20409a] animate-spin mb-2.5 md:mb-3" />
+                  <p className="text-xs md:text-sm font-bold text-slate-800"> DMV डाटाबेसमा खोज्दैछ...</p>
+                  <p className="text-[11px] md:text-xs text-slate-400 mt-1">Please wait while we query the records.</p>
                 </div>
               ) : renderResults.length === 0 ? (
                 /* RED WARNING BOX (MATCHES REF IMAGE) */
@@ -458,64 +463,64 @@ export default function PublicSearchPortal({
                   
                   if (isAvailable) {
                     return (
-                      <div className="space-y-4 animate-scale-in">
+                      <div className="space-y-3 md:space-y-4 animate-scale-in">
                         {/* LICENSE AVAILABLE MAIN CONTAINER (AS EXACT AS PICTURE 2) */}
-                        <div className="bg-[#f0fdf4] border-2 border-emerald-400 p-5 rounded-2xl shadow-xs space-y-4">
+                        <div className="bg-[#f0fdf4] border-2 border-emerald-400 p-3.5 sm:p-5 rounded-xl sm:rounded-2xl shadow-xs space-y-3 md:space-y-4">
                           
                           {/* Title block with check icon */}
-                          <div className="flex items-start gap-3">
-                            <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
+                          <div className="flex items-start gap-2.5 md:gap-3">
+                            <CheckCircle2 className="w-5 h-5 md:w-6 md:h-6 text-emerald-600 shrink-0 mt-0.5" />
                             <div>
-                              <h3 className="text-sm md:text-base font-black text-emerald-900 tracking-tight leading-snug">
+                              <h3 className="text-xs md:text-base font-black text-emerald-900 tracking-tight leading-snug">
                                 लाइसेन्स कार्ड उपलब्ध छ (LICENSE AVAILABLE)
                               </h3>
-                              <p className="text-xs md:text-sm font-bold text-emerald-800 leading-normal mt-0.5">
+                              <p className="text-[11px] md:text-sm font-bold text-emerald-800 leading-normal mt-0.5">
                                 तपाईंको प्रिन्ट भएको स्मार्ट कार्ड कार्यालयमा आइपुगेको छ।
                               </p>
                             </div>
                           </div>
 
-                          <div className="border-t border-emerald-200/60 my-2"></div>
+                          <div className="border-t border-emerald-200/60 my-1.5 md:my-2"></div>
 
                           {/* 4 Cards Grid */}
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 md:gap-4">
                             
                             {/* APPLICANT NAME */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 APPLICANT NAME / नाम
                               </span>
-                              <span className="text-sm md:text-base font-black text-blue-600 uppercase tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-blue-600 uppercase tracking-wide">
                                 {rec.fullName?.toUpperCase()}
                               </span>
                             </div>
 
                             {/* LICENSE NUMBER */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 LICENSE NUMBER / लाइसेन्स नं.
                               </span>
-                              <span className="text-sm md:text-base font-black text-blue-600 font-mono tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-blue-600 font-mono tracking-wide">
                                 {rec.licenseNo}
                               </span>
                             </div>
 
                             {/* CATEGORY */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 CATEGORY / वर्ग
                               </span>
-                              <span className="text-sm md:text-base font-black text-blue-600 font-mono tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-blue-600 font-mono tracking-wide">
                                 {rec.category}
                               </span>
                             </div>
 
                             {/* VISITING DAY */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 VISITING DAY / कार्ड बुझिलिने दिन
                               </span>
-                              <span className="text-sm md:text-base font-black text-blue-600 tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-blue-600 tracking-wide">
                                 {rec.visitDate || "सोमबार"}
                               </span>
                             </div>
@@ -523,16 +528,16 @@ export default function PublicSearchPortal({
                           </div>
 
                           {/* Collection Counter Info Card */}
-                          <div className="border border-slate-300 bg-white rounded-xl p-5 flex flex-col items-center justify-center text-center shadow-xs space-y-3.5">
-                            <p className="text-xs md:text-sm font-extrabold text-[#155724] tracking-wide leading-relaxed">
+                          <div className="border border-slate-300 bg-white rounded-xl p-3.5 sm:p-5 flex flex-col items-center justify-center text-center shadow-xs space-y-2 md:space-y-3.5">
+                            <p className="text-[11px] sm:text-xs md:text-sm font-extrabold text-[#155724] tracking-wide leading-relaxed">
                               पुरानो सक्कल लाइसेन्स वा रसिद बुझाउने ठाँउ (Collection Counter) कोठा नं. १६
                             </p>
                             <div className="border-t border-dashed border-slate-300 w-full"></div>
-                            <p className="text-xs md:text-sm font-extrabold text-blue-600 tracking-wide leading-relaxed">
+                            <p className="text-[11px] sm:text-xs md:text-sm font-extrabold text-blue-600 tracking-wide leading-relaxed">
                               स्मार्ट कार्ड वितरण काउन्टर (Distribution Counter) कोठा नं. १७
                             </p>
                             <div className="border-t border-dashed border-slate-300 w-full"></div>
-                            <p className="text-xs md:text-sm font-extrabold leading-relaxed text-slate-800">
+                            <p className="text-[11px] sm:text-xs md:text-sm font-extrabold leading-relaxed text-slate-800">
                               <span className="text-red-600">स्मार्ट कार्ड लिन जाने दिन </span>
                               <span className="text-blue-600">{rec.visitDate || "सोमबार"}</span> ।
                             </p>
@@ -543,64 +548,69 @@ export default function PublicSearchPortal({
                     );
                   } else {
                     return (
-                      <div className="space-y-4 animate-scale-in">
+                      <div className="space-y-3 md:space-y-4 animate-scale-in">
                         {/* LICENSE COLLECTED MAIN CONTAINER */}
-                        <div className="bg-[#f8f9fa] border-2 border-slate-300 p-5 rounded-2xl shadow-xs space-y-4">
+                        <div className="bg-[#f8f9fa] border-2 border-slate-300 p-3.5 sm:p-5 rounded-xl sm:rounded-2xl shadow-xs space-y-3 md:space-y-4">
                           
                           {/* Title block with check icon */}
-                          <div className="flex items-start gap-3">
-                            <CheckCircle2 className="w-6 h-6 text-slate-600 shrink-0 mt-0.5" />
+                          <div className="flex items-start gap-2.5 md:gap-3">
+                            <CheckCircle2 className="w-5 h-5 md:w-6 md:h-6 text-slate-600 shrink-0 mt-0.5" />
                             <div>
                               <h3 className="text-sm md:text-base font-black text-slate-800 tracking-tight leading-snug">
-                                लाइसेन्स कार्ड वितरण भइसकेको छ (LICENSE DELIVERED)
+                                <span className="hidden md:inline">
+                                  लाइसेन्स कार्ड वितरण भइसकेको छ (LICENSE DELIVERED)
+                                </span>
+                                <span className="inline md:hidden text-xs text-slate-800 font-extrabold">
+                                  लाइसेन्स कार्ड वितरण भइसकेको छ ।
+                                </span>
                               </h3>
-                              <p className="text-xs md:text-sm font-bold text-slate-600 leading-normal mt-0.5">
+                              <p className="hidden md:block text-xs md:text-sm font-bold text-slate-600 leading-normal mt-0.5">
                                 तपाईंको लाइसेन्स कार्ड बुझिलिइसकिएको छ।
                               </p>
                             </div>
                           </div>
 
-                          <div className="border-t border-slate-200 my-2"></div>
+                          <div className="border-t border-slate-200 my-1.5 md:my-2"></div>
 
                           {/* 4 Cards Grid */}
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 md:gap-4">
                             
                             {/* APPLICANT NAME */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 APPLICANT NAME / नाम
                               </span>
-                              <span className="text-sm md:text-base font-black text-slate-700 uppercase tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-slate-700 uppercase tracking-wide">
                                 {rec.fullName?.toUpperCase()}
                               </span>
                             </div>
 
                             {/* LICENSE NUMBER */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 LICENSE NUMBER / लाइसेन्स नं.
                               </span>
-                              <span className="text-sm md:text-base font-black text-slate-700 font-mono tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-slate-700 font-mono tracking-wide">
                                 {rec.licenseNo}
                               </span>
                             </div>
 
                             {/* CATEGORY */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 CATEGORY / वर्ग
                               </span>
-                              <span className="text-sm md:text-base font-black text-slate-700 font-mono tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-slate-700 font-mono tracking-wide">
                                 {rec.category}
                               </span>
                             </div>
 
                             {/* RECEIVED BY */}
-                            <div className="border border-slate-300 bg-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-xs">
-                              <span className="text-[10px] md:text-xs font-black text-slate-500 tracking-wider mb-1.5 uppercase">
+                            <div className="border border-slate-300 bg-white rounded-lg sm:rounded-xl p-3 sm:p-4 flex flex-col items-center justify-center text-center shadow-xs">
+                              <span className="text-[9px] md:text-xs font-black text-slate-500 tracking-wider mb-1 uppercase">
                                 RECEIVED BY / बुझिलिने व्यक्ति
                               </span>
-                              <span className="text-sm md:text-base font-black text-emerald-600 tracking-wide">
+                              <span className="text-xs sm:text-sm md:text-base font-black text-emerald-600 tracking-wide">
                                 {rec.receivedBy}
                               </span>
                             </div>
