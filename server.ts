@@ -47,6 +47,67 @@ let licensesCache: LicenseRecord[] = [];
 let uploadedLotsCache: any[] = [];
 let cachedStats: { total: number; available: number; handedOver: number; categories: Record<string, number> } | null = null;
 
+// Helper to normalize strings for robust searching (strips hyphens, spaces, lowercases once)
+function normalizeSearchStr(str: string): string {
+  return (str || "").toLowerCase().trim().replace(/[-\s]/g, "");
+}
+
+// Ultra high-speed O(1) search indexing structures
+interface IndexedRecord {
+  rec: LicenseRecord;
+  normAppId: string;
+  normLicNo: string;
+  normName: string;
+}
+
+let licenseNoIndex = new Map<string, LicenseRecord[]>();
+let applicantIdIndex = new Map<string, LicenseRecord[]>();
+let indexedCache: IndexedRecord[] = [];
+
+function rebuildSearchIndexes() {
+  const startTime = Date.now();
+  const licMap = new Map<string, LicenseRecord[]>();
+  const appMap = new Map<string, LicenseRecord[]>();
+  const total = licensesCache.length;
+  const indexed: IndexedRecord[] = new Array(total);
+
+  for (let i = 0; i < total; i++) {
+    const rec = licensesCache[i];
+    const normAppId = normalizeSearchStr(rec.applicantId);
+    const normLicNo = normalizeSearchStr(rec.licenseNo);
+    const normName = normalizeSearchStr(rec.fullName);
+
+    indexed[i] = { rec, normAppId, normLicNo, normName };
+
+    if (normLicNo) {
+      let list = licMap.get(normLicNo);
+      if (!list) {
+        list = [];
+        licMap.set(normLicNo, list);
+      }
+      list.push(rec);
+    }
+
+    if (normAppId) {
+      let list = appMap.get(normAppId);
+      if (!list) {
+        list = [];
+        appMap.set(normAppId, list);
+      }
+      list.push(rec);
+    }
+  }
+
+  licenseNoIndex = licMap;
+  applicantIdIndex = appMap;
+  indexedCache = indexed;
+
+  recalculateStats();
+  if (total > 0) {
+    console.log(`[Search Index] Rebuilt O(1) search maps for ${total.toLocaleString()} records in ${Date.now() - startTime}ms (${licMap.size} unique license keys, ${appMap.size} applicant keys).`);
+  }
+}
+
 function recalculateStats() {
   const total = licensesCache.length;
   let availableCount = 0;
@@ -540,7 +601,7 @@ async function pullFromFirestore() {
 
       // Update active in-memory cache from Firestore (Single Source of Truth)
       licensesCache = records;
-      recalculateStats();
+      rebuildSearchIndexes();
       console.log(`[Firebase] In-memory licensesCache updated with ${records.length} records from Firestore.`);
     } else {
       console.log("[Firebase] Firestore pulled 0 records.");
@@ -710,17 +771,12 @@ function loadDatabaseIntoCache() {
       console.log("No existing database found. Initializing empty database.");
       licensesCache = [];
     }
-    recalculateStats();
+    rebuildSearchIndexes();
   } catch (error) {
     console.error("Error reading database file:", error);
     licensesCache = [];
-    recalculateStats();
+    rebuildSearchIndexes();
   }
-}
-
-// Helper to normalize strings for robust searching
-function normalizeSearchStr(str: string): string {
-  return (str || "").toLowerCase().trim().replace(/[-\s]/g, "");
 }
 
 // In-memory rate limiting implementation for high security
@@ -861,35 +917,60 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
 
     const normQuery = normalizeSearchStr(queryStr);
     const isExact = exact === "true";
-    const matches: LicenseRecord[] = [];
+    const matchedSet = new Set<LicenseRecord>();
 
-    // Highly optimized zero-allocation loop to search through records
-    for (let i = 0; i < licensesCache.length; i++) {
-      const rec = licensesCache[i];
-      if (showOnlyAvailable && rec.receivedBy && rec.receivedBy.trim() !== "") {
-        continue;
-      }
-      
-      let isMatch = false;
-      if (isExact) {
-        const normAppId = normalizeSearchStr(rec.applicantId);
-        const normLicNo = normalizeSearchStr(rec.licenseNo);
-        const normName = normalizeSearchStr(rec.fullName);
-        const matchApplicantId = normAppId === normQuery || (normQuery.length >= 4 && normAppId.includes(normQuery));
-        const matchLicenseNo = normLicNo === normQuery || (normQuery.length >= 4 && normLicNo.includes(normQuery));
-        const matchName = normQuery.length >= 3 && normName.includes(normQuery);
-        isMatch = matchApplicantId || matchLicenseNo || matchName;
-      } else {
-        const matchApplicantId = normalizeSearchStr(rec.applicantId).includes(normQuery);
-        const matchLicenseNo = normalizeSearchStr(rec.licenseNo).includes(normQuery);
-        const matchFullName = normalizeSearchStr(rec.fullName).includes(normQuery);
-        isMatch = matchApplicantId || matchLicenseNo || matchFullName;
-      }
-
-      if (isMatch) {
-        matches.push(rec);
+    // 1. Instant O(1) Hash Map Lookups for License Number and Applicant ID
+    const licMatches = licenseNoIndex.get(normQuery);
+    if (licMatches) {
+      for (let i = 0; i < licMatches.length; i++) {
+        const rec = licMatches[i];
+        if (!showOnlyAvailable || !rec.receivedBy || rec.receivedBy.trim() === "") {
+          matchedSet.add(rec);
+        }
       }
     }
+
+    const appMatches = applicantIdIndex.get(normQuery);
+    if (appMatches) {
+      for (let i = 0; i < appMatches.length; i++) {
+        const rec = appMatches[i];
+        if (!showOnlyAvailable || !rec.receivedBy || rec.receivedBy.trim() === "") {
+          matchedSet.add(rec);
+        }
+      }
+    }
+
+    // 2. If O(1) map didn't yield matches, or if non-exact / name search is allowed
+    if (!isExact || matchedSet.size === 0) {
+      const len = indexedCache.length;
+      for (let i = 0; i < len; i++) {
+        const item = indexedCache[i];
+        if (showOnlyAvailable && item.rec.receivedBy && item.rec.receivedBy.trim() !== "") {
+          continue;
+        }
+
+        if (matchedSet.has(item.rec)) continue;
+
+        let isMatch = false;
+        if (isExact) {
+          const matchApplicantId = item.normAppId === normQuery || (normQuery.length >= 4 && item.normAppId.includes(normQuery));
+          const matchLicenseNo = item.normLicNo === normQuery || (normQuery.length >= 4 && item.normLicNo.includes(normQuery));
+          const matchName = normQuery.length >= 3 && item.normName.includes(normQuery);
+          isMatch = matchApplicantId || matchLicenseNo || matchName;
+        } else {
+          const matchApplicantId = item.normAppId.includes(normQuery);
+          const matchLicenseNo = item.normLicNo.includes(normQuery);
+          const matchFullName = item.normName.includes(normQuery);
+          isMatch = matchApplicantId || matchLicenseNo || matchFullName;
+        }
+
+        if (isMatch) {
+          matchedSet.add(item.rec);
+        }
+      }
+    }
+
+    const matches = Array.from(matchedSet);
 
     const totalMatches = matches.length;
     const startIndex = (pageNum - 1) * limitNum;
@@ -1128,7 +1209,7 @@ app.post(
 
       // Refresh in-memory cache
       licensesCache = finalRecords;
-      recalculateStats();
+      rebuildSearchIndexes();
       if (fs.existsSync(RESET_FLAG_PATH)) {
         fs.unlinkSync(RESET_FLAG_PATH);
       }
@@ -1439,7 +1520,7 @@ app.post("/api/license/reset", rateLimiter(5, 60000), async (req, res) => {
     console.log("Hard resetting license database...");
     licensesCache = [];
     uploadedLotsCache = [];
-    recalculateStats();
+    rebuildSearchIndexes();
 
     if (fs.existsSync(JSON_DB_PATH)) {
       fs.unlinkSync(JSON_DB_PATH);
@@ -1508,7 +1589,7 @@ app.post("/api/license/delete-lot", async (req, res) => {
     // Keep records that don't match the deleted lotCode
     licensesCache = licensesCache.filter(rec => rec.lotCode !== lotCode);
     const deletedCount = initialCount - licensesCache.length;
-    recalculateStats();
+    rebuildSearchIndexes();
 
     console.log(`[Database] Successfully deleted ${deletedCount} records matching lotCode: ${lotCode}`);
 
