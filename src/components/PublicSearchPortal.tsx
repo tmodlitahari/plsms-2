@@ -61,7 +61,7 @@ export default function PublicSearchPortal({
 
   React.useEffect(() => {
     QRCode.toDataURL(
-      "https://license-search-sunsari.onrender.com/plsms",
+      "https://license-search-sunsari.onrender.com",
       {
         width: 320,
         margin: 1,
@@ -81,7 +81,7 @@ export default function PublicSearchPortal({
   }, []);
 
   const handleCopyLink = () => {
-    navigator.clipboard.writeText("https://license-search-sunsari.onrender.com/plsms");
+    navigator.clipboard.writeText("https://license-search-sunsari.onrender.com");
     setIsCopied(true);
     setTimeout(() => {
       setIsCopied(false);
@@ -189,7 +189,7 @@ export default function PublicSearchPortal({
               <h1>Printed License Search Management System (PLSMS)</h1>
               <h2>Transport Management Office</h2>
               <p>Itahari, Sunsari</p>
-              <div class="url-box">https://license-search-sunsari.onrender.com/plsms</div>
+              <div class="url-box">https://license-search-sunsari.onrender.com</div>
             </div>
             <script>
               window.onload = function() {
@@ -724,7 +724,7 @@ export default function PublicSearchPortal({
 
               {/* Website Link Box */}
               <div className="bg-[#ebf2ff] border border-blue-200 rounded-lg py-2 px-3 text-center text-blue-700 text-xs font-mono font-bold max-w-[280px] w-full truncate select-all mt-3 flex items-center justify-center shadow-2xs">
-                https://license-search-sunsari.onrender.com/plsms
+                https://license-search-sunsari.onrender.com
               </div>
 
             </div>
