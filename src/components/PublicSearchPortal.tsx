@@ -361,12 +361,12 @@ export default function PublicSearchPortal({
           {/* Input & Form */}
           <form onSubmit={handleLocalSubmit} className="space-y-3 md:space-y-4 text-center">
             <div className="space-y-2 md:space-y-3 max-w-xl md:max-w-3xl mx-auto">
-              <label className="block text-center font-black uppercase tracking-widest px-0.5">
+              <label className="block text-center font-black tracking-widest px-0.5">
                 <span className="hidden md:inline text-xs text-slate-500">
-                  लाइसेन्स नम्बर प्रविष्ट गर्नुहोस् ENTER LICENSE NO: XX-XX-XXXXXXXX
+                  Enter Your Applicant ID or License Number: XX-XX-XXXXXXXX
                 </span>
                 <span className="inline md:hidden text-[10px] min-[360px]:text-[11px] text-[#20409a]">
-                  ENTER LICENSE NO: XX-XX-XXXXXXXX
+                  Enter Your Applicant ID or License Number: XX-XX-XXXXXXXX
                 </span>
               </label>
               
