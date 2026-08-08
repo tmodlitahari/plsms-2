@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import * as xlsx from "xlsx";
 import { initializeApp, cert, deleteApp, App } from "firebase-admin/app";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
@@ -32,6 +31,9 @@ interface LicenseRecord {
   visitDate: string;
   receivedBy: string;
   lotCode?: string;
+  _nA?: string;
+  _nL?: string;
+  _nN?: string;
 }
 
 const app = express();
@@ -59,23 +61,14 @@ function normalizeSearchStr(str: string): string {
 }
 
 // Ultra high-speed O(1) search indexing structures
-interface IndexedRecord {
-  rec: LicenseRecord;
-  normAppId: string;
-  normLicNo: string;
-  normName: string;
-}
-
 let licenseNoIndex = new Map<string, LicenseRecord[]>();
 let applicantIdIndex = new Map<string, LicenseRecord[]>();
-let indexedCache: IndexedRecord[] = [];
 
 function rebuildSearchIndexes() {
   const startTime = Date.now();
   const licMap = new Map<string, LicenseRecord[]>();
   const appMap = new Map<string, LicenseRecord[]>();
   const total = licensesCache.length;
-  const indexed: IndexedRecord[] = new Array(total);
 
   for (let i = 0; i < total; i++) {
     const rec = licensesCache[i];
@@ -83,7 +76,9 @@ function rebuildSearchIndexes() {
     const normLicNo = normalizeSearchStr(rec.licenseNo);
     const normName = normalizeSearchStr(rec.fullName);
 
-    indexed[i] = { rec, normAppId, normLicNo, normName };
+    rec._nA = normAppId;
+    rec._nL = normLicNo;
+    rec._nN = normName;
 
     if (normLicNo) {
       let list = licMap.get(normLicNo);
@@ -106,9 +101,11 @@ function rebuildSearchIndexes() {
 
   licenseNoIndex = licMap;
   applicantIdIndex = appMap;
-  indexedCache = indexed;
 
   recalculateStats();
+  if (global.gc) {
+    try { (global as any).gc(); } catch (e) {}
+  }
   if (total > 0) {
     console.log(`[Search Index] Rebuilt O(1) search maps for ${total.toLocaleString()} records in ${Date.now() - startTime}ms (${licMap.size} unique license keys, ${appMap.size} applicant keys).`);
   }
@@ -142,11 +139,17 @@ function recalculateStats() {
 function saveJsonDatabaseSafe(records: LicenseRecord[]) {
   try {
     const tmpPath = `${JSON_DB_PATH}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(records), "utf-8");
+    const jsonStr = JSON.stringify(records, (key, value) => {
+      if (key === "_nA" || key === "_nL" || key === "_nN") return undefined;
+      return value;
+    });
+    fs.writeFileSync(tmpPath, jsonStr, "utf-8");
     fs.renameSync(tmpPath, JSON_DB_PATH);
+    if (global.gc) {
+      try { (global as any).gc(); } catch (e) {}
+    }
   } catch (err) {
     console.error("Error saving JSON database safely:", err);
-    fs.writeFileSync(JSON_DB_PATH, JSON.stringify(records), "utf-8");
   }
 }
 
@@ -717,12 +720,23 @@ async function pullFromFirestore() {
       const chunkCount = manifest?.chunkCount || 0;
       console.log(`[Firebase] Found chunked dataset manifest with ${chunkCount} chunks (${manifest?.totalRecords} records)...`);
       
+      // Clear previous cache references to release RAM before loading remote dataset
+      licensesCache = [];
+      licenseNoIndex.clear();
+      applicantIdIndex.clear();
+      if (global.gc) {
+        try { (global as any).gc(); } catch (e) {}
+      }
+
       for (let c = 0; c < chunkCount; c++) {
         const chunkDoc = await chunksCollection.doc(`chunk_${c}`).get();
         if (chunkDoc.exists) {
           const chunkData = chunkDoc.data();
           if (chunkData && Array.isArray(chunkData.records)) {
-            records.push(...chunkData.records);
+            const cRecs = chunkData.records;
+            for (let r = 0; r < cRecs.length; r++) {
+              records.push(cRecs[r]);
+            }
           }
         }
         activeSyncStatus.processedRecords = records.length;
@@ -865,20 +879,16 @@ async function pullLotsFromFirestore() {
 function writeCsvDatabase(records: LicenseRecord[]) {
   setImmediate(() => {
     try {
-      const csvHeaders = ["SN", "APPLICANT ID", "FULL NAME", "LICENSE NO", "CATEGORY", "OLD CODE", "NEW CODE", "VISIT DATE", "RECEIVED BY"];
-      const csvRows = records.map((r) => [
-        `"${(r.sn || "").replace(/"/g, '""')}"`,
-        `"${(r.applicantId || "").replace(/"/g, '""')}"`,
-        `"${(r.fullName || "").replace(/"/g, '""')}"`,
-        `"${(r.licenseNo || "").replace(/"/g, '""')}"`,
-        `"${(r.category || "").replace(/"/g, '""')}"`,
-        `"${(r.oldCode || "").replace(/"/g, '""')}"`,
-        `"${(r.newCode || "").replace(/"/g, '""')}"`,
-        `"${(r.visitDate || "").replace(/"/g, '""')}"`,
-        `"${(r.receivedBy || "").replace(/"/g, '""')}"`
-      ].join(","));
-      const csvContent = [csvHeaders.join(","), ...csvRows].join("\n");
-      fs.writeFile(CSV_DB_PATH, csvContent, "utf-8", () => {});
+      const stream = fs.createWriteStream(CSV_DB_PATH, { encoding: "utf-8" });
+      stream.write("SN,APPLICANT ID,FULL NAME,LICENSE NO,CATEGORY,OLD CODE,NEW CODE,VISIT DATE,RECEIVED BY\n");
+      for (let i = 0; i < records.length; i++) {
+        const r = records[i];
+        stream.write(`"${(r.sn || "").replace(/"/g, '""')}","${(r.applicantId || "").replace(/"/g, '""')}","${(r.fullName || "").replace(/"/g, '""')}","${(r.licenseNo || "").replace(/"/g, '""')}","${(r.category || "").replace(/"/g, '""')}","${(r.oldCode || "").replace(/"/g, '""')}","${(r.newCode || "").replace(/"/g, '""')}","${(r.visitDate || "").replace(/"/g, '""')}","${(r.receivedBy || "").replace(/"/g, '""')}"\n`);
+      }
+      stream.end();
+      if (global.gc) {
+        try { (global as any).gc(); } catch (e) {}
+      }
     } catch (e) {
       console.error("Error writing CSV database in background:", e);
     }
@@ -1091,30 +1101,34 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
 
     // 2. If O(1) map didn't yield matches, or if non-exact / name search is allowed
     if (!isExact || matchedSet.size === 0) {
-      const len = indexedCache.length;
+      const len = licensesCache.length;
       for (let i = 0; i < len; i++) {
-        const item = indexedCache[i];
-        if (showOnlyAvailable && item.rec.receivedBy && item.rec.receivedBy.trim() !== "") {
+        const rec = licensesCache[i];
+        if (showOnlyAvailable && rec.receivedBy && rec.receivedBy.trim() !== "") {
           continue;
         }
 
-        if (matchedSet.has(item.rec)) continue;
+        if (matchedSet.has(rec)) continue;
+
+        const normAppId = rec._nA || (rec._nA = normalizeSearchStr(rec.applicantId));
+        const normLicNo = rec._nL || (rec._nL = normalizeSearchStr(rec.licenseNo));
+        const normName = rec._nN || (rec._nN = normalizeSearchStr(rec.fullName));
 
         let isMatch = false;
         if (isExact) {
-          const matchApplicantId = item.normAppId === normQuery || (normQuery.length >= 4 && item.normAppId.includes(normQuery));
-          const matchLicenseNo = item.normLicNo === normQuery || (normQuery.length >= 4 && item.normLicNo.includes(normQuery));
-          const matchName = normQuery.length >= 3 && item.normName.includes(normQuery);
+          const matchApplicantId = normAppId === normQuery || (normQuery.length >= 4 && normAppId.includes(normQuery));
+          const matchLicenseNo = normLicNo === normQuery || (normQuery.length >= 4 && normLicNo.includes(normQuery));
+          const matchName = normQuery.length >= 3 && normName.includes(normQuery);
           isMatch = matchApplicantId || matchLicenseNo || matchName;
         } else {
-          const matchApplicantId = item.normAppId.includes(normQuery);
-          const matchLicenseNo = item.normLicNo.includes(normQuery);
-          const matchFullName = item.normName.includes(normQuery);
+          const matchApplicantId = normAppId.includes(normQuery);
+          const matchLicenseNo = normLicNo.includes(normQuery);
+          const matchFullName = normName.includes(normQuery);
           isMatch = matchApplicantId || matchLicenseNo || matchFullName;
         }
 
         if (isMatch) {
-          matchedSet.add(item.rec);
+          matchedSet.add(rec);
         }
       }
     }
@@ -1981,8 +1995,19 @@ async function startServer() {
     });
   });
 
+  // Unmatched API catch-all handler: prevent any /api request from falling through to SPA HTML
+  app.all("/api/*", (req: express.Request, res: express.Response) => {
+    res.setHeader("Content-Type", "application/json");
+    res.status(404).json({
+      success: false,
+      error: `API route not found: ${req.method} ${req.originalUrl}`,
+      message: `API route not found: ${req.method} ${req.originalUrl}`
+    });
+  });
+
   // Step 5: Mount Vite middleware or static serve
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,

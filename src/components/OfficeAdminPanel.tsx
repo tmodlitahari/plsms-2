@@ -25,6 +25,23 @@ import {
   Ban
 } from "lucide-react";
 
+// Safe JSON fetch helper
+async function safeFetchJson<T = any>(url: string, options?: RequestInit): Promise<T | null> {
+  try {
+    const res = await fetch(url, options);
+    const contentType = res.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      const text = await res.text();
+      console.warn(`[API] Server returned non-JSON response (${res.status}) for ${url}:`, text.slice(0, 100));
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.error(`[API] Error fetching ${url}:`, err);
+    return null;
+  }
+}
+
 // Types
 interface Stats {
   total: number;
@@ -422,9 +439,8 @@ export default function OfficeAdminPanel({
     try {
       const q = browseSearch.trim();
       const url = `/api/search?q=${encodeURIComponent(q)}&page=${browsePage}&limit=${browseLimit}${tableMode === "available" ? "&available=true" : ""}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson(url);
+      if (data && data.success) {
         setBrowseRecords(data.results);
         setBrowseTotal(data.totalMatches);
       }
@@ -597,9 +613,8 @@ export default function OfficeAdminPanel({
   useEffect(() => {
     const loadServerLots = async () => {
       try {
-        const res = await fetch("/api/uploaded-lots");
-        const data = await res.json();
-        if (data.success && Array.isArray(data.uploadedLots)) {
+        const data = await safeFetchJson("/api/uploaded-lots");
+        if (data && data.success && Array.isArray(data.uploadedLots)) {
           setUploadedLots(data.uploadedLots);
           localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(data.uploadedLots));
         }
@@ -1090,9 +1105,8 @@ export default function OfficeAdminPanel({
 
       try {
         const url = `/api/search?q=${encodeURIComponent(query)}&page=1&limit=5&exact=true`;
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data.success) {
+        const data = await safeFetchJson(url);
+        if (data && data.success) {
           setAdminSearchResults(data.results);
         }
       } catch (err: any) {

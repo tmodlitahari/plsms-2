@@ -235,26 +235,35 @@ export default function App() {
   const [fbError, setFbError] = useState<string | null>(null);
   const [fbSuccessMsg, setFbSuccessMsg] = useState<string | null>(null);
 
+  // Helper for safe JSON fetching
+  const safeFetchJson = async (url: string, options?: RequestInit) => {
+    const res = await fetch(url, options);
+    const contentType = res.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      const text = await res.text();
+      throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 100)}`);
+    }
+    return await res.json();
+  };
+
   // Load stats and database size
   const fetchStats = async () => {
     try {
-      const res = await fetch("/api/stats");
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson("/api/stats");
+      if (data && data.success && data.stats) {
         setStats(data.stats);
         setTotalInDb(data.stats.total);
       }
     } catch (e) {
-      console.error("Error fetching statistics:", e);
+      console.warn("Error fetching statistics:", e);
     }
   };
 
   // Fetch Firebase state
   const fetchFirebaseStatus = async () => {
     try {
-      const res = await fetch("/api/firebase/status");
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson("/api/firebase/status");
+      if (data && data.success) {
         setFirebaseStatus(data);
         if (data.projectId) {
           setFbProjectIdInput(data.projectId);
@@ -268,13 +277,12 @@ export default function App() {
               const { projectId, clientEmail, privateKey } = JSON.parse(savedCreds);
               if (projectId && clientEmail && privateKey) {
                 console.log("[Client] Auto-restoring Firebase config to server from localStorage...");
-                const configRes = await fetch("/api/firebase/config", {
+                const configData = await safeFetchJson("/api/firebase/config", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ projectId, clientEmail, privateKey }),
                 });
-                const configData = await configRes.json();
-                if (configData.success) {
+                if (configData && configData.success) {
                   setTimeout(() => {
                     fetchFirebaseStatus();
                     fetchFirebaseSyncProgress();
@@ -289,20 +297,19 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.error("Error checking Firebase status:", e);
+      console.warn("Error checking Firebase status:", e);
     }
   };
 
   // Fetch dynamic sync progress
   const fetchFirebaseSyncProgress = async () => {
     try {
-      const res = await fetch("/api/firebase/sync/status");
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson("/api/firebase/sync/status");
+      if (data && data.success) {
         setFirebaseSyncProgress(data.status);
       }
     } catch (e) {
-      console.error("Error checking sync progress:", e);
+      console.warn("Error checking sync progress:", e);
     }
   };
 
@@ -459,9 +466,8 @@ export default function App() {
     setIsSearching(true);
     try {
       const url = `/api/search?q=${encodeURIComponent(query)}&page=${searchPage}&limit=${limit}&exact=true`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson(url);
+      if (data && data.success) {
         setResults(data.results);
         setTotalMatches(data.totalMatches);
         setTotalInDb(data.totalInDb);
