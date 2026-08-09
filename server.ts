@@ -561,8 +561,8 @@ function getNepaliDateStr(): string {
 function synchronizeDashboardAndLots() {
   const totalInCache = licensesCache.length;
   if (totalInCache === 0) {
-    if (uploadedLotsCache.length > 0) {
-      console.log("[Sync] licensesCache is 0. Resetting uploadedLotsCache.");
+    if (startupComplete && uploadedLotsCache.length > 0) {
+      console.log("[Sync] licensesCache is verified 0. Resetting uploadedLotsCache.");
       uploadedLotsCache = [];
       try {
         fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8");
@@ -605,8 +605,11 @@ function synchronizeDashboardAndLots() {
     });
   } else {
     let cumulative = 0;
+    const existingCodes = new Set<string>();
+
     uploadedLotsCache = uploadedLotsCache.map(lot => {
       const lotCode = lot.code || lot.id || "LOT-RESTORED";
+      existingCodes.add(lotCode);
       const recCount = lotCounts[lotCode] !== undefined ? lotCounts[lotCode] : (lot.records || 0);
       const prev = cumulative;
       cumulative += recCount;
@@ -624,9 +627,33 @@ function synchronizeDashboardAndLots() {
         duplicateFound: lot.duplicateFound !== undefined ? lot.duplicateFound : 0,
         totalRecordsAfter: lot.totalRecordsAfter !== undefined ? lot.totalRecordsAfter : cumulative,
         status: lot.status || "Active",
-        uploadedBy: lot.uploadedBy || "Administrator"
+        uploadedBy: lot.uploadedBy || lot.by || "Administrator"
       };
     });
+
+    // Ensure any new lot code present in licensesCache is also added to uploadedLotsCache
+    for (const [code, count] of Object.entries(lotCounts)) {
+      if (!existingCodes.has(code)) {
+        const prev = cumulative;
+        cumulative += count;
+        uploadedLotsCache.push({
+          id: code,
+          code: code,
+          name: `${code}.xlsx`,
+          fileName: `${code}.xlsx`,
+          uploadDate: todayStr,
+          nepaliDate: nepaliDateStr,
+          prevRecords: prev,
+          records: count,
+          recentRecords: count,
+          duplicateFound: 0,
+          totalRecordsAfter: cumulative,
+          status: "Active",
+          uploadedBy: "Administrator",
+          timestamp: Date.now()
+        });
+      }
+    }
   }
 
   try {
@@ -1062,6 +1089,7 @@ app.use(["/api/stats", "/api/search", "/api/uploaded-lots", "/api/license", "/ap
 
 // Get list of uploaded lots from server database
 app.get("/api/uploaded-lots", (req, res) => {
+  synchronizeDashboardAndLots();
   res.json({ success: true, uploadedLots: uploadedLotsCache });
 });
 
@@ -1070,15 +1098,26 @@ app.post("/api/uploaded-lots", async (req, res) => {
   try {
     const { uploadedLots } = req.body;
     if (Array.isArray(uploadedLots)) {
-      uploadedLotsCache = uploadedLots;
-      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
-      
-      // Push back up to Firestore if connected
-      if (firestoreDb) {
-        pushLotsToFirestore().catch(e => console.error("[Firebase] Async pushLotsToFirestore failed:", e));
+      if (uploadedLots.length === 0 && licensesCache.length > 0) {
+        console.warn("[Database] Ignoring client POST with 0 lots because database has active records. Resynchronizing server lots.");
+        synchronizeDashboardAndLots();
+      } else if (uploadedLots.length > 0) {
+        uploadedLotsCache = uploadedLots.map(lot => ({
+          ...lot,
+          id: lot.code || lot.id || "LOT-RESTORED",
+          code: lot.code || lot.id || "LOT-RESTORED",
+          name: lot.name || lot.fileName || `${lot.code || lot.id || 'LOT'}.xlsx`,
+          fileName: lot.fileName || lot.name || `${lot.code || lot.id || 'LOT'}.xlsx`,
+          uploadDate: lot.uploadDate || lot.dateTime || new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }),
+          status: lot.status || "Active",
+          uploadedBy: lot.uploadedBy || lot.by || "Administrator"
+        }));
+        fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+        if (firestoreDb) {
+          pushLotsToFirestore().catch(e => console.error("[Firebase] Async pushLotsToFirestore failed:", e));
+        }
       }
-      
-      return res.json({ success: true, message: "Uploaded lots list saved successfully.", count: uploadedLotsCache.length });
+      return res.json({ success: true, message: "Uploaded lots list saved successfully.", count: uploadedLotsCache.length, uploadedLots: uploadedLotsCache });
     } else {
       return res.status(400).json({ success: false, error: "Invalid uploadedLots data. Must be an array." });
     }
@@ -1602,6 +1641,8 @@ app.post(
           recentRecords: totalParsed,
           duplicateFound: duplicates.length,
           duplicatesList: duplicates,
+          uploadedLots: uploadedLotsCache,
+          lotEntry,
           timeMs: Date.now() - startTime,
         });
       }
@@ -1615,6 +1656,8 @@ app.post(
         recentRecords: totalParsed,
         duplicateFound: duplicates.length,
         duplicatesList: duplicates,
+        uploadedLots: uploadedLotsCache,
+        lotEntry,
         timeMs: Date.now() - startTime,
       });
 

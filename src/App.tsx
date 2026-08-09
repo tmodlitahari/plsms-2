@@ -527,6 +527,11 @@ export default function App() {
 
       const data = await response.json();
       if (data.success) {
+        if (Array.isArray(data.uploadedLots) && data.uploadedLots.length > 0) {
+          try {
+            localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(data.uploadedLots));
+          } catch (e) {}
+        }
         setUploadStatus({
           success: true,
           message: data.alreadySynced

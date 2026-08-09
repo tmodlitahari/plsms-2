@@ -82,13 +82,17 @@ interface LicenseRecord {
 }
 
 interface UploadedLot {
+  id?: string;
   code: string;
+  name?: string;
   fileName: string;
-  dateTime: string;
+  dateTime?: string;
+  uploadDate?: string;
   records: number;
-  method: string;
+  method?: string;
   status: string;
-  by: string;
+  by?: string;
+  uploadedBy?: string;
   fileType?: string;
   nepaliDate?: string;
   prevRecords?: number;
@@ -526,10 +530,34 @@ export default function OfficeAdminPanel({
   };
 
   const getDynamicLotCode = (lotCode: string): string => {
-    const originalIndex = uploadedLots.findIndex(l => l.code === lotCode);
+    if (!lotCode) return "1st-LOT";
+    if (lotCode.includes("-LOT") || lotCode.includes("LOT-")) return lotCode;
+    const originalIndex = uploadedLots.findIndex(l => l.code === lotCode || l.id === lotCode);
     if (originalIndex === -1) return lotCode;
-    const chronologicalOrder = uploadedLots.length - originalIndex;
-    return getOrdinalLot(chronologicalOrder);
+    return getOrdinalLot(originalIndex + 1);
+  };
+
+  const normalizeLot = (lot: any): UploadedLot => {
+    const code = lot.code || lot.id || "LOT-RESTORED";
+    const nameStr = lot.fileName || lot.name || `${code}.xlsx`;
+    return {
+      ...lot,
+      id: code,
+      code: code,
+      name: nameStr,
+      fileName: nameStr,
+      uploadDate: lot.uploadDate || lot.dateTime || new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }),
+      dateTime: lot.dateTime || lot.uploadDate || new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }),
+      nepaliDate: lot.nepaliDate || "2083/04/01",
+      records: lot.records || 0,
+      prevRecords: lot.prevRecords !== undefined ? lot.prevRecords : 0,
+      recentRecords: lot.recentRecords !== undefined ? lot.recentRecords : lot.records || 0,
+      duplicateFound: lot.duplicateFound !== undefined ? lot.duplicateFound : 0,
+      totalRecordsAfter: lot.totalRecordsAfter !== undefined ? lot.totalRecordsAfter : lot.records || 0,
+      status: lot.status || "Active",
+      by: lot.uploadedBy || lot.by || "Administrator",
+      uploadedBy: lot.uploadedBy || lot.by || "Administrator"
+    };
   };
 
   // Persistent Client States via LocalStorage
@@ -537,15 +565,13 @@ export default function OfficeAdminPanel({
     const cached = localStorage.getItem("nepal_dmv_uploaded_lots");
     if (cached) {
       try {
-        const parsed = JSON.parse(cached) as UploadedLot[];
-        // Filter out demo/mock lots to clear them permanently from browser caches!
-        const filtered = parsed.filter(lot => 
-          lot.fileName && 
-          !lot.fileName.includes("test---") && 
-          !lot.fileName.includes("all_records") && 
-          lot.fileName !== "all data for public.csv"
-        );
-        // Save the cleaned array back to localStorage to clear browser cache permanently
+        const parsed = JSON.parse(cached) as any[];
+        const filtered = parsed
+          .filter(lot => {
+            const fname = lot.fileName || lot.name || "";
+            return !fname.includes("test---") && !fname.includes("all_records") && fname !== "all data for public.csv";
+          })
+          .map(normalizeLot);
         localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(filtered));
         return filtered;
       } catch (e) {
@@ -595,37 +621,41 @@ export default function OfficeAdminPanel({
   const [confPassword, setConfPassword] = useState("");
   const [passwordStatusMsg, setPasswordStatusMsg] = useState<{ success: boolean; message: string } | null>(null);
 
+  const loadServerLots = async () => {
+    try {
+      const data = await safeFetchJson("/api/uploaded-lots");
+      if (data && data.success && Array.isArray(data.uploadedLots)) {
+        const normalized = data.uploadedLots.map(normalizeLot);
+        setUploadedLots(normalized);
+        localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(normalized));
+      }
+    } catch (e) {
+      console.error("Error fetching uploaded lots from server:", e);
+    } finally {
+      hasLoadedServerLots.current = true;
+    }
+  };
+
   // Keep localStorage and server database updated on state change
   useEffect(() => {
-    localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(uploadedLots));
-    
-    // Auto-save uploaded lots list to server so they persist in the central database
-    if (hasLoadedServerLots.current) {
-      fetch("/api/uploaded-lots", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uploadedLots })
-      }).catch(e => console.error("Error backing up uploaded lots to server:", e));
+    if (uploadedLots.length > 0) {
+      localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(uploadedLots));
+      
+      // Auto-save uploaded lots list to server so they persist in the central database
+      if (hasLoadedServerLots.current) {
+        fetch("/api/uploaded-lots", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uploadedLots })
+        }).catch(e => console.error("Error backing up uploaded lots to server:", e));
+      }
     }
   }, [uploadedLots]);
 
-  // Load uploaded lots from server on initial mount to avoid having to upload files again
+  // Load uploaded lots from server on initial mount and when totalInDb updates
   useEffect(() => {
-    const loadServerLots = async () => {
-      try {
-        const data = await safeFetchJson("/api/uploaded-lots");
-        if (data && data.success && Array.isArray(data.uploadedLots)) {
-          setUploadedLots(data.uploadedLots);
-          localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(data.uploadedLots));
-        }
-      } catch (e) {
-        console.error("Error fetching uploaded lots from server:", e);
-      } finally {
-        hasLoadedServerLots.current = true;
-      }
-    };
     loadServerLots();
-  }, []);
+  }, [totalInDb]);
 
   useEffect(() => {
     localStorage.setItem("nepal_dmv_admin_users", JSON.stringify(adminUsers));
@@ -1196,12 +1226,16 @@ export default function OfficeAdminPanel({
   };
 
   // Filter lots by search query
-  const filteredLots = uploadedLots.filter(lot => {
+  const filteredLots = uploadedLots.map(normalizeLot).filter(lot => {
     const dynCode = getDynamicLotCode(lot.code);
-    return lot.code.toLowerCase().includes(lotSearchQuery.toLowerCase()) ||
-           dynCode.toLowerCase().includes(lotSearchQuery.toLowerCase()) ||
-           lot.fileName.toLowerCase().includes(lotSearchQuery.toLowerCase()) ||
-           lot.by.toLowerCase().includes(lotSearchQuery.toLowerCase());
+    const q = lotSearchQuery.toLowerCase();
+    const codeStr = (lot.code || lot.id || "").toLowerCase();
+    const fileStr = (lot.fileName || lot.name || "").toLowerCase();
+    const byStr = (lot.uploadedBy || lot.by || "").toLowerCase();
+    return codeStr.includes(q) ||
+           dynCode.toLowerCase().includes(q) ||
+           fileStr.includes(q) ||
+           byStr.includes(q);
   });
 
   // Filter logs by search query
