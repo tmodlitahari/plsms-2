@@ -54,6 +54,7 @@ let databaseReady = false;
 let cacheReady = false;
 let startupComplete = false;
 let startupError: string | null = null;
+let isImportingLock = false;
 
 // Helper to normalize strings for robust searching (strips hyphens, spaces, lowercases once)
 function normalizeSearchStr(str: string): string {
@@ -603,53 +604,64 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
   activeSyncStatus.startTime = Date.now();
 
   const CHUNK_SIZE = 1000;
-  const totalChunks = Math.ceil(records.length / CHUNK_SIZE);
   const chunksCollection = firestoreDb.collection("dataset_chunks");
 
+  let existingTotalRecords = 0;
+  let existingChunkCount = 0;
   let startChunkIndex = 0;
+
   if (isAppend) {
     try {
       const manifestDoc = await chunksCollection.doc("manifest").get();
       if (manifestDoc.exists) {
-        const existingChunkCount = manifestDoc.data()?.chunkCount || 0;
-        if (existingChunkCount > 0) {
-          startChunkIndex = Math.max(0, existingChunkCount - 1);
-          console.log(`[Firebase] APPEND mode active: Preserving existing chunks 0 to ${startChunkIndex - 1}, writing new chunks starting from chunk_${startChunkIndex}...`);
-        }
+        const mData = manifestDoc.data();
+        existingTotalRecords = mData?.totalRecords || 0;
+        existingChunkCount = mData?.chunkCount || 0;
       }
     } catch (e) {
-      console.warn("[Firebase] Warning reading existing manifest for append mode chunk index:", e);
+      console.warn("[Firebase] Warning reading existing manifest for append mode:", e);
     }
+    startChunkIndex = existingChunkCount;
+    console.log(`[Import] Mode: APPEND`);
+    console.log(`[Import] New records received: ${records.length}`);
+    console.log(`[Import] Existing Firestore total: ${existingTotalRecords}`);
+    console.log(`[Import] Existing Firestore chunks: ${existingChunkCount}`);
+    console.log(`[Import] New chunk start index: ${startChunkIndex}`);
+  } else {
+    console.log(`[Import] Mode: OVERWRITE | Records: ${records.length}`);
   }
 
-  let uploadedChunksCount = startChunkIndex;
+  const numNewChunks = Math.ceil(records.length / CHUNK_SIZE);
+  console.log(`[Import] New chunks to write: ${numNewChunks}`);
+
+  let uploadedChunksCount = 0;
 
   try {
-    console.log(`[Firebase] Starting parallel chunked backup of ${records.length} records (${totalChunks} total chunks) starting at chunk ${startChunkIndex}...`);
-
     const CONCURRENCY = 10;
-    const remainingChunksToUpload: number[] = [];
-    for (let c = startChunkIndex; c < totalChunks; c++) {
-      remainingChunksToUpload.push(c);
+    const chunkIndexesToUpload: number[] = [];
+    for (let c = 0; c < numNewChunks; c++) {
+      chunkIndexesToUpload.push(c);
     }
 
-    for (let i = 0; i < remainingChunksToUpload.length; i += CONCURRENCY) {
-      const batchIndexes = remainingChunksToUpload.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < chunkIndexesToUpload.length; i += CONCURRENCY) {
+      const batch = chunkIndexesToUpload.slice(i, i + CONCURRENCY);
       try {
-        await Promise.all(batchIndexes.map(async (c) => {
-          const chunkRecords = records.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
-          await chunksCollection.doc(`chunk_${c}`).set({
-            chunkIndex: c,
+        await Promise.all(batch.map(async (cIndex) => {
+          const chunkRecords = records.slice(cIndex * CHUNK_SIZE, (cIndex + 1) * CHUNK_SIZE);
+          const targetChunkId = startChunkIndex + cIndex;
+          console.log(`[Import] Writing chunk_${targetChunkId}`);
+          await chunksCollection.doc(`chunk_${targetChunkId}`).set({
+            chunkIndex: targetChunkId,
             records: chunkRecords,
             updatedAt: Date.now()
           });
         }));
-        uploadedChunksCount += batchIndexes.length;
-        activeSyncStatus.processedRecords = Math.min(records.length, (startChunkIndex + uploadedChunksCount) * CHUNK_SIZE);
+        uploadedChunksCount += batch.length;
+        activeSyncStatus.processedRecords = Math.min(records.length, uploadedChunksCount * CHUNK_SIZE);
       } catch (batchErr: any) {
-        const failedChunkIndex = batchIndexes[0];
-        const remaining = totalChunks - uploadedChunksCount;
-        console.error(`[Firebase] Chunk upload failed at batch starting chunk_${failedChunkIndex}:`, batchErr);
+        const failedChunkIndex = startChunkIndex + batch[0];
+        const remaining = numNewChunks - uploadedChunksCount;
+        console.error(`[Firebase] Chunk upload failed at chunk_${failedChunkIndex}:`, batchErr);
         activeSyncStatus.error = batchErr.message || String(batchErr);
         activeSyncStatus.isSyncing = false;
         return {
@@ -662,21 +674,25 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
       }
     }
 
-    // Save/update manifest doc safely
+    // Save/update manifest doc safely ONLY after all new chunks succeeded
+    const finalTotalRecords = isAppend ? (existingTotalRecords + records.length) : records.length;
+    const finalChunkCount = isAppend ? (existingChunkCount + numNewChunks) : numNewChunks;
+
     await chunksCollection.doc("manifest").set({
-      totalRecords: records.length,
-      chunkCount: totalChunks,
+      totalRecords: finalTotalRecords,
+      chunkCount: finalChunkCount,
       updatedAt: Date.now()
     });
+    console.log(`[Import] Manifest updated: totalRecords=${finalTotalRecords}, chunkCount=${finalChunkCount}`);
 
     // Also push uploaded lots to Firestore config
     await pushLotsToFirestore().catch(e => console.error("[Firebase] Error saving uploaded lots manifest:", e));
 
-    console.log(`[Firebase] Parallel chunked dataset backup complete successfully (${totalChunks} chunks, ${records.length} records)!`);
+    console.log(`[Import] Append completed successfully (${numNewChunks} new chunks written, total chunks: ${finalChunkCount})!`);
     activeSyncStatus.isSyncing = false;
     return {
       success: true,
-      uploadedChunks: totalChunks
+      uploadedChunks: numNewChunks
     };
   } catch (err: any) {
     console.error("[Firebase] Sync push error:", err);
@@ -685,8 +701,6 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
     return {
       success: false,
       uploadedChunks: uploadedChunksCount,
-      failedChunk: uploadedChunksCount,
-      remainingChunks: totalChunks - uploadedChunksCount,
       error: err.message || String(err)
     };
   }
@@ -1170,6 +1184,17 @@ app.post(
     // 1. Force response content-type to application/json on entry
     res.setHeader("Content-Type", "application/json");
 
+    if (isImportingLock) {
+      console.warn("[Import] Blocked concurrent import request (lock active).");
+      return res.status(429).json({
+        success: false,
+        error: "An import operation is already in progress. Please wait for it to complete.",
+        message: "An import operation is already in progress. Please wait for it to complete."
+      });
+    }
+
+    isImportingLock = true;
+
     try {
       const filename = (req.query.filename as string) || "database.xlsx";
       const buffer = req.body;
@@ -1355,32 +1380,37 @@ app.post(
 
       if (method === "append") {
         if (firestoreDb) {
-          console.log("[Import] Pre-import hydration: Synchronously pulling latest production dataset from Firestore before APPEND...");
-          try {
-            await pullFromFirestore();
-          } catch (pullErr: any) {
-            console.warn("[Import] Firestore hydration before append warning:", pullErr);
-          }
-
           if (licensesCache.length === 0) {
+            console.log("[Import] Append Mode: RAM cache EMPTY after startup. Full Firestore hydration required.");
             try {
-              const chunksColl = firestoreDb.collection("dataset_chunks");
-              const mDoc = await chunksColl.doc("manifest").get();
-              if (mDoc.exists && (mDoc.data()?.totalRecords || 0) > 0) {
-                console.error("[Import] APPEND CANCELLED: Firestore contains existing production data but local hydration returned 0 records.");
-                return res.status(400).json({
-                  success: false,
-                  error: "Append cancelled because existing production data could not be loaded.",
-                  message: "Append cancelled because existing production data could not be loaded."
-                });
-              }
-            } catch (e) {
-              console.warn("[Import] Error verifying manifest during append pre-hydration check:", e);
+              await pullFromFirestore();
+            } catch (pullErr: any) {
+              console.warn("[Import] Firestore hydration before append warning:", pullErr);
             }
+
+            if (licensesCache.length === 0) {
+              try {
+                const chunksColl = firestoreDb.collection("dataset_chunks");
+                const mDoc = await chunksColl.doc("manifest").get();
+                if (mDoc.exists && (mDoc.data()?.totalRecords || 0) > 0) {
+                  console.error("[Import] APPEND CANCELLED: Firestore contains existing production data but local hydration returned 0 records.");
+                  return res.status(400).json({
+                    success: false,
+                    error: "Append cancelled because existing production data could not be loaded.",
+                    message: "Append cancelled because existing production data could not be loaded."
+                  });
+                }
+              } catch (e) {
+                console.warn("[Import] Error verifying manifest during append pre-hydration check:", e);
+              }
+            }
+          } else {
+            console.log(`[Import] Mode: APPEND | Existing RAM cache: READY (${licensesCache.length} records). Skipping full Firestore pull.`);
           }
         }
       }
 
+      let recordsToPersistToFirestore: LicenseRecord[] = [];
       let finalRecords: LicenseRecord[] = [];
       const prevRecords = method === "append" ? licensesCache.length : 0;
       const duplicates: LicenseRecord[] = [];
@@ -1393,6 +1423,7 @@ app.post(
           sn: String(prevRecords + 1 + idx),
           serialNo: String(prevRecords + 1 + idx)
         }));
+        recordsToPersistToFirestore = adjustedParsed;
         finalRecords = [...licensesCache, ...adjustedParsed];
       } else {
         const seenInThisFile = new Set<string>();
@@ -1415,6 +1446,7 @@ app.post(
           sn: String(1 + idx),
           serialNo: String(1 + idx)
         }));
+        recordsToPersistToFirestore = finalRecords;
       }
 
       const totalParsed = parsedRecords.length;
@@ -1426,6 +1458,8 @@ app.post(
 
       licensesCache = finalRecords;
       rebuildSearchIndexes();
+      console.log(`[Import] RAM cache incrementally updated. Total records now: ${licensesCache.length}`);
+
       if (fs.existsSync(RESET_FLAG_PATH)) {
         try { fs.unlinkSync(RESET_FLAG_PATH); } catch (e) {}
       }
@@ -1478,15 +1512,18 @@ app.post(
       // Write directly and synchronously to Firestore as Single Source of Truth BEFORE responding
       let firestoreSyncResult: { success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string } = { success: true, uploadedChunks: 0 };
       if (firestoreDb) {
-        console.log(`[Import] Persisting ${finalRecords.length} records to Firestore (method: ${method})...`);
         if (method === "overwrite") {
+          console.log(`[Import] Mode: OVERWRITE | Persisting ${recordsToPersistToFirestore.length} records to Firestore...`);
           try {
             await clearFirestoreCollection();
           } catch (clearErr: any) {
             console.error("[Import] Error clearing firestore collection:", clearErr);
           }
+          firestoreSyncResult = await pushToFirestoreInBatches(recordsToPersistToFirestore, false);
+        } else {
+          console.log(`[Import] Mode: APPEND | Incrementally persisting ${recordsToPersistToFirestore.length} new records to Firestore...`);
+          firestoreSyncResult = await pushToFirestoreInBatches(recordsToPersistToFirestore, true);
         }
-        firestoreSyncResult = await pushToFirestoreInBatches(finalRecords, method === "append");
         await pushLotsToFirestore().catch(e => console.error("[Import] pushLotsToFirestore error:", e));
         console.log("[Import] Firestore synchronization complete.", firestoreSyncResult);
       }
@@ -1529,6 +1566,8 @@ app.post(
         message: error.message || String(error),
         stack: process.env.NODE_ENV !== "production" ? error.stack : undefined 
       });
+    } finally {
+      isImportingLock = false;
     }
   }
 );
