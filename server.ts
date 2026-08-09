@@ -56,6 +56,13 @@ let startupComplete = false;
 let startupError: string | null = null;
 let isImportingLock = false;
 
+// Helper to check if an error is a Firestore quota limit error
+function isQuotaExceededError(err: any): boolean {
+  if (!err) return false;
+  const msg = ((err && err.message) || String(err) || "").toLowerCase();
+  return msg.includes("quota limit exceeded") || msg.includes("quota exceeded") || msg.includes("resource_exhausted") || msg.includes("free daily read units");
+}
+
 // Helper to normalize strings for robust searching (strips hyphens, spaces, lowercases once)
 function normalizeSearchStr(str: string): string {
   return (str || "").toLowerCase().trim().replace(/[-\s]/g, "");
@@ -395,6 +402,8 @@ async function initFirebase(): Promise<boolean> {
 
     // 1. Attempt Firebase Admin SDK if service account credentials exist
     if (clientEmail && privateKey) {
+      let adminApp: any = null;
+      let adminDb: any = null;
       try {
         let cleanedPrivateKey = privateKey.trim();
         if ((cleanedPrivateKey.startsWith('"') && cleanedPrivateKey.endsWith('"')) || 
@@ -407,7 +416,7 @@ async function initFirebase(): Promise<boolean> {
           cleanedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${cleanedPrivateKey}\n-----END PRIVATE KEY-----`;
         }
 
-        const adminApp = initializeApp({
+        adminApp = initializeApp({
           credential: cert({
             projectId,
             clientEmail,
@@ -415,8 +424,19 @@ async function initFirebase(): Promise<boolean> {
           })
         }, "nepal-license-central-db-admin");
 
-        const adminDb = databaseId ? getFirestore(adminApp, databaseId) : getFirestore(adminApp);
-        await adminDb.collection("dataset_chunks").doc("manifest").get();
+        adminDb = databaseId ? getFirestore(adminApp, databaseId) : getFirestore(adminApp);
+        try {
+          await adminDb.collection("dataset_chunks").doc("manifest").get();
+        } catch (mErr: any) {
+          if (isQuotaExceededError(mErr)) {
+            console.warn("[Firebase] Admin SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+            firebaseApp = adminApp;
+            firestoreDb = adminDb;
+            firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+            return true;
+          }
+          throw mErr;
+        }
 
         firebaseApp = adminApp;
         firestoreDb = adminDb;
@@ -429,42 +449,69 @@ async function initFirebase(): Promise<boolean> {
         console.log("=========================================");
         return true;
       } catch (adminErr: any) {
+        if (adminApp && adminDb && isQuotaExceededError(adminErr)) {
+          console.warn("[Firebase] Admin SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+          firebaseApp = adminApp;
+          firestoreDb = adminDb;
+          firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+          return true;
+        }
         console.warn("[Firebase] Admin SDK init failed, trying Web SDK fallback:", adminErr.message || adminErr);
       }
     }
 
-    // 2. Fallback to Firebase Web Client SDK with apiKey (from firebase-applet-config.json)
-    if (apiKey) {
-      try {
-        const webApp = initWebClientApp({
-          projectId,
-          apiKey,
-          authDomain,
-          appId,
-        }, "nepal-license-central-db-web");
+      // 2. Fallback to Firebase Web Client SDK with apiKey (from firebase-applet-config.json)
+      if (apiKey) {
+        let webApp: any = null;
+        let adapterDb: any = null;
+        try {
+          webApp = initWebClientApp({
+            projectId,
+            apiKey,
+            authDomain,
+            appId,
+          }, "nepal-license-central-db-web");
 
-        const rawWebDb = getWebClientFirestore(webApp, databaseId || undefined);
-        const adapterDb = createWebFirestoreAdapter(rawWebDb);
-        await adapterDb.collection("dataset_chunks").doc("manifest").get();
+          const rawWebDb = getWebClientFirestore(webApp, databaseId || undefined);
+          adapterDb = createWebFirestoreAdapter(rawWebDb);
+          try {
+            await adapterDb.collection("dataset_chunks").doc("manifest").get();
+          } catch (mErr: any) {
+            if (isQuotaExceededError(mErr)) {
+              console.warn("[Firebase] Web SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+              firebaseApp = webApp;
+              firestoreDb = adapterDb;
+              firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+              return true;
+            }
+            throw mErr;
+          }
 
-        firebaseApp = webApp;
-        firestoreDb = adapterDb;
-        firebaseConfigError = null;
-        console.log("=========================================");
-        console.log("[Firebase] Firebase initialized");
-        console.log("[Firebase] Firestore connected");
-        console.log(`[Firebase] Project ID: ${projectId}`);
-        if (databaseId) console.log(`[Firebase] Database ID: ${databaseId}`);
-        console.log("=========================================");
-        return true;
-      } catch (webErr: any) {
-        const errMsg = webErr.message || String(webErr);
-        console.error(`[Firebase] Firestore Web SDK connection failed: ${errMsg}`);
-        firebaseConfigError = `Firestore connection failed: ${errMsg}`;
-        firestoreDb = null;
-        return false;
+          firebaseApp = webApp;
+          firestoreDb = adapterDb;
+          firebaseConfigError = null;
+          console.log("=========================================");
+          console.log("[Firebase] Firebase initialized");
+          console.log("[Firebase] Firestore connected");
+          console.log(`[Firebase] Project ID: ${projectId}`);
+          if (databaseId) console.log(`[Firebase] Database ID: ${databaseId}`);
+          console.log("=========================================");
+          return true;
+        } catch (webErr: any) {
+          if (webApp && adapterDb && isQuotaExceededError(webErr)) {
+            console.warn("[Firebase] Web SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+            firebaseApp = webApp;
+            firestoreDb = adapterDb;
+            firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+            return true;
+          }
+          const errMsg = webErr.message || String(webErr);
+          console.error(`[Firebase] Firestore Web SDK connection failed: ${errMsg}`);
+          firebaseConfigError = `Firestore connection failed: ${errMsg}`;
+          firestoreDb = null;
+          return false;
+        }
       }
-    }
 
     // Diagnostic missing item reporting
     const missingItems: string[] = [];
@@ -733,14 +780,6 @@ async function pullFromFirestore() {
       const manifest = manifestDoc.data();
       const chunkCount = manifest?.chunkCount || 0;
       console.log(`[Firebase] Found chunked dataset manifest with ${chunkCount} chunks (${manifest?.totalRecords} records)...`);
-      
-      // Clear previous cache references to release RAM before loading remote dataset
-      licensesCache = [];
-      licenseNoIndex.clear();
-      applicantIdIndex.clear();
-      if (global.gc) {
-        try { (global as any).gc(); } catch (e) {}
-      }
 
       for (let c = 0; c < chunkCount; c++) {
         const chunkDoc = await chunksCollection.doc(`chunk_${c}`).get();
@@ -792,8 +831,14 @@ async function pullFromFirestore() {
       startupError = null;
       console.log(`[Firebase] In-memory licensesCache updated with ${records.length} records from Firestore.`);
     } else {
-      console.log("[Firebase] Firestore pulled 0 records.");
-      if (firestoreDb) {
+      console.log("[Firebase] Firestore pulled 0 records. Retaining current cache if available.");
+      if (licensesCache.length === 0) {
+        loadDatabaseIntoCache();
+      }
+      if (licensesCache.length > 0) {
+        cacheReady = true;
+        startupError = null;
+      } else {
         cacheReady = false;
         startupError = "Firestore dataset hydration returned 0 records.";
       }
@@ -801,13 +846,28 @@ async function pullFromFirestore() {
 
     await pullLotsFromFirestore();
     synchronizeDashboardAndLots();
-    await pushLotsToFirestore();
+    await pushLotsToFirestore().catch(() => {});
 
     activeSyncStatus.isSyncing = false;
   } catch (err: any) {
     console.error("[Firebase] Sync pull error:", err);
     activeSyncStatus.error = err.message || String(err);
     activeSyncStatus.isSyncing = false;
+
+    // Fall back to local disk backup if RAM cache is empty
+    if (licensesCache.length === 0) {
+      console.log("[Firebase] Attempting local disk backup load due to pull failure...");
+      loadDatabaseIntoCache();
+      loadUploadedLotsIntoCache();
+    }
+
+    if (licensesCache.length > 0) {
+      rebuildSearchIndexes();
+      synchronizeDashboardAndLots();
+      cacheReady = true;
+      startupError = null;
+      console.log(`[Firebase] Active fallback: Local RAM cache operational with ${licensesCache.length.toLocaleString()} records.`);
+    }
   }
 }
 
@@ -1936,14 +1996,19 @@ async function startServer() {
       console.log("[Startup] Firestore connection verified. Checking dataset in Firestore...");
 
       // Load dataset_chunks/manifest doc
-      const chunksCollection = firestoreDb.collection("dataset_chunks");
-      const manifestDoc = await chunksCollection.doc("manifest").get();
-      let hasFirestoreData = manifestDoc.exists;
+      let hasFirestoreData = false;
+      try {
+        const chunksCollection = firestoreDb.collection("dataset_chunks");
+        const manifestDoc = await chunksCollection.doc("manifest").get();
+        hasFirestoreData = manifestDoc.exists;
 
-      if (!hasFirestoreData) {
-        const legacyRef = firestoreDb.collection("licenses");
-        const legacySnapshot = await legacyRef.limit(1).get();
-        hasFirestoreData = !legacySnapshot.empty;
+        if (!hasFirestoreData) {
+          const legacyRef = firestoreDb.collection("licenses");
+          const legacySnapshot = await legacyRef.limit(1).get();
+          hasFirestoreData = !legacySnapshot.empty;
+        }
+      } catch (mErr: any) {
+        console.warn("[Startup] Firestore manifest check warning:", mErr.message || mErr);
       }
 
       if (hasFirestoreData) {
@@ -1952,19 +2017,27 @@ async function startServer() {
         await pullLotsFromFirestore();
         console.log(`[Startup] Firestore hydration complete: ${licensesCache.length.toLocaleString()} records loaded.`);
       } else {
-        console.log("[Startup] Firestore is empty on startup. Checking for local dataset fallback...");
+        console.log("[Startup] Firestore is empty or quota reached on startup. Checking for local dataset fallback...");
         if (licensesCache.length > 0) {
-          console.log(`[Startup] Uploading ${licensesCache.length.toLocaleString()} local records to Firestore...`);
-          await pushToFirestoreInBatches(licensesCache);
-          await pushLotsToFirestore();
+          console.log(`[Startup] Attempting background push of ${licensesCache.length.toLocaleString()} local records to Firestore...`);
+          await pushToFirestoreInBatches(licensesCache).catch(e => console.warn("[Startup] Batch push warning:", e));
+          await pushLotsToFirestore().catch(e => console.warn("[Startup] Push lots warning:", e));
         }
       }
     } else {
       console.warn(`[Startup] Firebase connection warning: ${firebaseConfigError || "Firestore not connected"}. Running on local cache.`);
     }
   } catch (err: any) {
-    console.error("[Startup] CRITICAL ERROR during Firestore startup hydration:", err);
-    startupError = err.message || String(err);
+    console.error("[Startup] Firestore startup hydration warning:", err.message || err);
+    if (isQuotaExceededError(err)) {
+      console.warn("[Startup] Firestore quota limit exceeded during startup. Operating on local cache fallback.");
+    }
+  }
+
+  // Ensure local RAM cache fallback is loaded if licensesCache is 0
+  if (licensesCache.length === 0) {
+    loadDatabaseIntoCache();
+    loadUploadedLotsIntoCache();
   }
 
   // Step 4: Verify search indexes and run startup data integrity audit
