@@ -165,9 +165,15 @@ function loadUploadedLotsIntoCache() {
   try {
     if (fs.existsSync(UPLOADED_LOTS_PATH)) {
       const rawData = fs.readFileSync(UPLOADED_LOTS_PATH, "utf-8");
-      uploadedLotsCache = JSON.parse(rawData);
-      if (licensesCache.length === 0 && uploadedLotsCache.length > 0) {
-        console.log("[Database] Database cache is empty (0 records). Clearing ghost uploaded lots.");
+      try {
+        uploadedLotsCache = JSON.parse(rawData);
+      } catch (e) {
+        console.warn("[Database] UPLOADED_LOTS_PATH corrupt JSON, attempting recovery...");
+        const recovered = parseCorruptedJsonArray(rawData);
+        uploadedLotsCache = recovered || [];
+      }
+      if (startupComplete && licensesCache.length === 0 && uploadedLotsCache.length > 0) {
+        console.log("[Database] Database cache is verified empty (0 records). Clearing ghost uploaded lots.");
         uploadedLotsCache = [];
         fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8");
       }
@@ -185,7 +191,9 @@ function loadUploadedLotsIntoCache() {
       const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
       uploadedLotsCache = Object.entries(lotCounts).map(([code, count]) => ({
         id: code,
+        code: code,
         name: `${code}.xlsx`,
+        fileName: `${code}.xlsx`,
         uploadDate: todayStr,
         records: count,
         status: "Active"
@@ -996,30 +1004,153 @@ function writeCsvDatabase(records: LicenseRecord[]) {
   });
 }
 
+function parseCorruptedJsonArray(rawData: string): any[] | null {
+  try {
+    const parsed = JSON.parse(rawData);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (e) {
+    console.warn("[JSON Recovery] Standard JSON.parse failed. Attempting automated recovery of truncated JSON...");
+  }
+
+  try {
+    let lastPos = rawData.length;
+    let attempts = 0;
+    while (attempts < 100) {
+      attempts++;
+      const lastBraceIndex = rawData.lastIndexOf("}", lastPos - 1);
+      if (lastBraceIndex === -1) break;
+
+      let candidate = rawData.substring(0, lastBraceIndex + 1).trim();
+      if (candidate.endsWith(",")) {
+        candidate = candidate.slice(0, -1).trim();
+      }
+      if (!candidate.endsWith("]")) {
+        candidate += "\n]";
+      }
+
+      try {
+        const parsed = JSON.parse(candidate);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          console.log(`[JSON Recovery] Successfully recovered ${parsed.length.toLocaleString()} valid records from truncated JSON (cut off at char ${lastBraceIndex}).`);
+          return parsed;
+        }
+      } catch (err) {
+        lastPos = lastBraceIndex;
+      }
+    }
+  } catch (recErr) {
+    console.error("[JSON Recovery] Error during truncated JSON recovery:", recErr);
+  }
+
+  return null;
+}
+
+function loadDatabaseFromCsvFallback(): LicenseRecord[] {
+  if (!fs.existsSync(CSV_DB_PATH)) return [];
+  try {
+    console.log("[CSV Recovery] Reading database from license_db.csv fallback...");
+    const content = fs.readFileSync(CSV_DB_PATH, "utf-8");
+    const lines = content.split(/\r?\n/);
+    if (lines.length <= 1) return [];
+
+    const records: LicenseRecord[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const values: string[] = [];
+      let current = "";
+      let inQuotes = false;
+      for (let c = 0; c < line.length; c++) {
+        const char = line[c];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          values.push(current.replace(/^"|"$/g, '').replace(/""/g, '"'));
+          current = "";
+        } else {
+          current += char;
+        }
+      }
+      values.push(current.replace(/^"|"$/g, '').replace(/""/g, '"'));
+
+      if (values.length >= 4) {
+        records.push({
+          sn: values[0] || String(records.length + 1),
+          applicantId: values[1] || "",
+          fullName: values[2] || "",
+          licenseNo: values[3] || "",
+          category: values[4] || "",
+          oldCode: values[5] || "",
+          newCode: values[6] || "",
+          visitDate: values[7] || "",
+          receivedBy: values[8] || "",
+          lotCode: ""
+        });
+      }
+    }
+    console.log(`[CSV Recovery] Successfully loaded ${records.length.toLocaleString()} records from CSV database.`);
+    return records;
+  } catch (err) {
+    console.error("[CSV Recovery] Error parsing CSV database file:", err);
+    return [];
+  }
+}
+
 // Load database into cache on startup
 function loadDatabaseIntoCache() {
   try {
+    let parsed: any[] | null = null;
+    let loadedFromCorruptFile = false;
+
     if (fs.existsSync(JSON_DB_PATH)) {
       console.log("Loading license database into memory...");
       const startTime = Date.now();
       const rawData = fs.readFileSync(JSON_DB_PATH, "utf-8");
-      const parsed = JSON.parse(rawData);
       
-      if (Array.isArray(parsed)) {
+      try {
+        parsed = JSON.parse(rawData);
+      } catch (jsonErr: any) {
+        console.warn(`[Database] Error reading database JSON: ${jsonErr.message || jsonErr}. Attempting recovery...`);
+        parsed = parseCorruptedJsonArray(rawData);
+        if (parsed) {
+          loadedFromCorruptFile = true;
+        }
+      }
+
+      if (Array.isArray(parsed) && parsed.length > 0) {
         licensesCache = parsed.map((r: any) => ({
           ...r,
           lotCode: r.lotCode || ""
         }));
-        console.log(`Successfully loaded ${licensesCache.length} licenses in ${Date.now() - startTime}ms.`);
+        console.log(`Successfully loaded ${licensesCache.length.toLocaleString()} licenses in ${Date.now() - startTime}ms.`);
+        
+        if (loadedFromCorruptFile) {
+          console.log("[Database] Re-saving repaired database to disk cleanly...");
+          saveJsonDatabaseSafe(licensesCache);
+        }
       }
-    } else {
-      console.log("No existing database found. Initializing empty database.");
-      licensesCache = [];
     }
+
+    // Fallback to CSV database if JSON load returned 0 records or failed
+    if (licensesCache.length === 0 && fs.existsSync(CSV_DB_PATH)) {
+      const csvRecords = loadDatabaseFromCsvFallback();
+      if (csvRecords.length > 0) {
+        licensesCache = csvRecords;
+        saveJsonDatabaseSafe(licensesCache);
+      }
+    }
+
+    if (licensesCache.length === 0 && !fs.existsSync(JSON_DB_PATH) && !fs.existsSync(CSV_DB_PATH)) {
+      console.log("No existing database found. Initializing empty database.");
+    }
+
     rebuildSearchIndexes();
   } catch (error) {
     console.error("Error reading database file:", error);
-    licensesCache = [];
+    if (licensesCache.length === 0 && fs.existsSync(CSV_DB_PATH)) {
+      licensesCache = loadDatabaseFromCsvFallback();
+    }
     rebuildSearchIndexes();
   }
 }
