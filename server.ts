@@ -711,6 +711,8 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
     console.log(`[Import] New chunk start index: ${startChunkIndex}`);
   } else {
     console.log(`[Import] Mode: OVERWRITE | Records: ${records.length}`);
+    await clearFirestoreCollection();
+    startChunkIndex = 0;
   }
 
   const numNewChunks = Math.ceil(records.length / CHUNK_SIZE);
@@ -770,7 +772,7 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
     // Also push uploaded lots to Firestore config
     await pushLotsToFirestore().catch(e => console.error("[Firebase] Error saving uploaded lots manifest:", e));
 
-    console.log(`[Import] Append completed successfully (${numNewChunks} new chunks written, total chunks: ${finalChunkCount})!`);
+    console.log(`[Import] Import push completed successfully (${numNewChunks} new chunks written, total chunks: ${finalChunkCount})!`);
     activeSyncStatus.isSyncing = false;
     return {
       success: true,
@@ -816,14 +818,20 @@ async function pullFromFirestore() {
       const chunkCount = manifest?.chunkCount || 0;
       console.log(`[Firebase] Found chunked dataset manifest with ${chunkCount} chunks (${manifest?.totalRecords} records)...`);
 
-      for (let c = 0; c < chunkCount; c++) {
-        const chunkDoc = await chunksCollection.doc(`chunk_${c}`).get();
-        if (chunkDoc.exists) {
-          const chunkData = chunkDoc.data();
-          if (chunkData && Array.isArray(chunkData.records)) {
-            const cRecs = chunkData.records;
-            for (let r = 0; r < cRecs.length; r++) {
-              records.push(cRecs[r]);
+      const CONCURRENCY = 15;
+      for (let c = 0; c < chunkCount; c += CONCURRENCY) {
+        const batchIndices = [];
+        for (let j = c; j < Math.min(c + CONCURRENCY, chunkCount); j++) {
+          batchIndices.push(j);
+        }
+        const docs = await Promise.all(
+          batchIndices.map(idx => chunksCollection.doc(`chunk_${idx}`).get())
+        );
+        for (const chunkDoc of docs) {
+          if (chunkDoc.exists) {
+            const chunkData = chunkDoc.data();
+            if (chunkData && Array.isArray(chunkData.records)) {
+              records.push(...chunkData.records);
             }
           }
         }
@@ -1229,10 +1237,10 @@ app.post("/api/uploaded-lots", async (req, res) => {
   try {
     const { uploadedLots } = req.body;
     if (Array.isArray(uploadedLots)) {
-      if (uploadedLots.length === 0 && licensesCache.length > 0) {
-        console.warn("[Database] Ignoring client POST with 0 lots because database has active records. Resynchronizing server lots.");
+      if ((uploadedLots.length === 0 && licensesCache.length > 0) || (uploadedLots.length < uploadedLotsCache.length)) {
+        console.warn(`[Database] Ignoring client POST with lots (${uploadedLots.length}) smaller than server (${uploadedLotsCache.length}). Resynchronizing server lots.`);
         synchronizeDashboardAndLots();
-      } else if (uploadedLots.length > 0) {
+      } else if (uploadedLots.length >= uploadedLotsCache.length && uploadedLots.length > 0) {
         uploadedLotsCache = uploadedLots.map(lot => ({
           ...lot,
           id: lot.code || lot.id || "LOT-RESTORED",
@@ -1405,406 +1413,416 @@ app.post("/api/seed", rateLimiter(10, 60000), (req, res) => {
   });
 });
 
-// 3. Import CSV/Excel database
-// We use express.raw to support large direct binary/text uploads up to 150MB
-app.post(
-  "/api/import",
-  express.raw({ limit: "150mb", type: "*/*" }),
-  async (req, res) => {
-    // 1. Force response content-type to application/json on entry
-    res.setHeader("Content-Type", "application/json");
+// 3. Import CSV/Excel database with background async job processing
+interface ImportJob {
+  id: string;
+  status: "processing" | "completed" | "failed";
+  progress: number;
+  message: string;
+  filename: string;
+  method: string;
+  lotCode: string;
+  result?: any;
+  error?: string;
+  createdAt: number;
+}
 
-    if (isImportingLock) {
-      console.warn("[Import] Blocked concurrent import request (lock active).");
-      return res.status(429).json({
-        success: false,
-        error: "An import operation is already in progress. Please wait for it to complete.",
-        message: "An import operation is already in progress. Please wait for it to complete."
-      });
-    }
+const importJobs = new Map<string, ImportJob>();
 
-    isImportingLock = true;
-
-    try {
-      const filename = (req.query.filename as string) || "database.xlsx";
-      const buffer = req.body;
-
-      if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: "Empty file uploaded or request body is missing.",
-          message: "Empty file uploaded or request body is missing."
-        });
-      }
-
-      console.log(`Received upload: ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
-      const startTime = Date.now();
-
-      // Safely parse workbook
-      let workbook: xlsx.WorkBook;
-      try {
-        workbook = xlsx.read(buffer, { type: "buffer" });
-      } catch (parseErr: any) {
-        console.error("[Import] Excel binary parsing error:", parseErr);
-        return res.status(400).json({
-          success: false,
-          error: `Failed to parse Excel/CSV spreadsheet format: ${parseErr.message || String(parseErr)}`,
-          message: `Failed to parse Excel/CSV spreadsheet format: ${parseErr.message || String(parseErr)}`
-        });
-      }
-
-      if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: "The uploaded file does not contain any sheets.",
-          message: "The uploaded file does not contain any sheets."
-        });
-      }
-
-      const firstSheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[firstSheetName];
-      
-      let rawRows: any[][] = [];
-      try {
-        rawRows = xlsx.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
-      } catch (sheetErr: any) {
-        return res.status(400).json({
-          success: false,
-          error: `Error reading sheet content: ${sheetErr.message || String(sheetErr)}`,
-          message: `Error reading sheet content: ${sheetErr.message || String(sheetErr)}`
-        });
-      }
-      
-      if (!rawRows || rawRows.length < 2) {
-        return res.status(400).json({
-          success: false,
-          error: "The uploaded sheet does not contain enough data (headers or data rows missing).",
-          message: "The uploaded sheet does not contain enough data."
-        });
-      }
-
-      // Identify header index and map them to our internal fields
-      const headers = rawRows[0].map((h: any) => String(h || "").trim().toUpperCase());
-      
-      // Map columns
-      const snCol = headers.findIndex((h) => h === "SN" || h === "S.N." || h === "S.NO." || h === "SERIAL");
-      const applicantIdCol = headers.findIndex((h) => h.includes("APPLICANT ID") || h.includes("APPLICANT_ID") || h.includes("APPLICANTID"));
-      const fullNameCol = headers.findIndex((h) => h.includes("FULL NAME") || h.includes("FULL_NAME") || h.includes("NAME"));
-      const licenseNoCol = headers.findIndex((h) => h.includes("LICENSE NO") || h.includes("LICENSE_NO") || h.includes("LICENSE NUMBER") || h.includes("LICENSE"));
-      const categoryCol = headers.findIndex((h) => h.includes("CATEGORY") || h.includes("CLASS"));
-      const oldCodeCol = headers.findIndex((h) => h.includes("OLD CODE") || h.includes("OLD_CODE"));
-      const newCodeCol = headers.findIndex((h) => h.includes("NEW CODE") || h.includes("NEW_CODE"));
-      const visitDateCol = headers.findIndex((h) => h.includes("VISIT DATE") || h.includes("VISIT_DATE") || h.includes("VISIT"));
-      const receivedByCol = headers.findIndex((h) => h.includes("RECEIVED BY") || h.includes("RECEIVED_BY") || h.includes("RECEIVED"));
-
-      console.log("Column Mapping Detected:", {
-        snCol, applicantIdCol, fullNameCol, licenseNoCol, categoryCol, oldCodeCol, newCodeCol, visitDateCol, receivedByCol
-      });
-
-      if (applicantIdCol === -1 && licenseNoCol === -1) {
-        return res.status(400).json({
-          success: false,
-          error: "Could not find 'APPLICANT ID' or 'LICENSE NO' column in your sheet header. Please make sure the headers match the specified columns.",
-          message: "Could not find 'APPLICANT ID' or 'LICENSE NO' column in your sheet header."
-        });
-      }
-
-      const lotCode = (req.query.lotCode as string) || "LOT-2083-IMPORT";
-      const parsedRecords: LicenseRecord[] = [];
-      
-      for (let i = 1; i < rawRows.length; i++) {
-        const row = rawRows[i];
-        if (!row || row.length === 0) continue;
-
-        const hasData = row.some((cell: any) => cell !== undefined && cell !== null && String(cell).trim() !== "");
-        if (!hasData) continue;
-
-        const record: LicenseRecord = {
-          sn: snCol !== -1 && row[snCol] !== undefined ? String(row[snCol]).trim() : String(i),
-          serialNo: snCol !== -1 && row[snCol] !== undefined ? String(row[snCol]).trim() : String(i),
-          applicantId: applicantIdCol !== -1 && row[applicantIdCol] !== undefined ? String(row[applicantIdCol]).trim() : "",
-          fullName: fullNameCol !== -1 && row[fullNameCol] !== undefined ? String(row[fullNameCol]).trim() : "",
-          licenseNo: licenseNoCol !== -1 && row[licenseNoCol] !== undefined ? String(row[licenseNoCol]).trim() : "",
-          category: categoryCol !== -1 && row[categoryCol] !== undefined ? String(row[categoryCol]).trim() : "",
-          oldCode: oldCodeCol !== -1 && row[oldCodeCol] !== undefined ? String(row[oldCodeCol]).trim() : "",
-          newCode: newCodeCol !== -1 && row[newCodeCol] !== undefined ? String(row[newCodeCol]).trim() : "",
-          visitDate: visitDateCol !== -1 && row[visitDateCol] !== undefined ? String(row[visitDateCol]).trim() : "",
-          receivedBy: receivedByCol !== -1 && row[receivedByCol] !== undefined ? String(row[receivedByCol]).trim() : "",
-          lotCode
-        };
-
-        parsedRecords.push(record);
-      }
-
-      if (parsedRecords.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: "No valid data rows could be parsed from the uploaded spreadsheet.",
-          message: "No valid data rows could be parsed from the uploaded spreadsheet."
-        });
-      }
-
-      // Ensure cache is populated
-      if (licensesCache.length === 0 && fs.existsSync(JSON_DB_PATH)) {
-        try {
-          licensesCache = JSON.parse(fs.readFileSync(JSON_DB_PATH, "utf-8"));
-        } catch (e) {}
-      }
-
-      // Check if uploaded records match current database perfectly
-      let isAlreadySynced = false;
-      if (licensesCache.length > 0 && parsedRecords.length === licensesCache.length) {
-        let allMatched = true;
-        for (let i = 0; i < parsedRecords.length; i++) {
-          const r1 = parsedRecords[i];
-          const r2 = licensesCache[i];
-          if (
-            (r1.applicantId || "").trim() !== (r2.applicantId || "").trim() ||
-            (r1.fullName || "").trim() !== (r2.fullName || "").trim() ||
-            (r1.licenseNo || "").trim() !== (r2.licenseNo || "").trim() ||
-            (r1.category || "").trim() !== (r2.category || "").trim() ||
-            (r1.oldCode || "").trim() !== (r2.oldCode || "").trim() ||
-            (r1.newCode || "").trim() !== (r2.newCode || "").trim()
-          ) {
-            allMatched = false;
-            break;
-          }
-        }
-        if (allMatched) {
-          isAlreadySynced = true;
-        }
-      }
-
-      if (isAlreadySynced) {
-        if (uploadedLotsCache.length === 0) {
-          const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-          uploadedLotsCache = [{
-            id: lotCode,
-            name: filename,
-            uploadDate: todayStr,
-            records: licensesCache.length,
-            status: "Active"
-          }];
-          try {
-            fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
-          } catch (e) {}
-          if (firestoreDb) {
-            pushLotsToFirestore().catch(() => {});
-          }
-        }
-        return res.json({
-          success: true,
-          alreadySynced: true,
-          message: "It is already synced !!!",
-          total: licensesCache.length,
-          totalInDb: licensesCache.length,
-          prevRecords: licensesCache.length,
-          recentRecords: 0,
-          duplicateFound: 0,
-          duplicatesList: [],
-          timeMs: Date.now() - startTime,
-        });
-      }
-
-      const method = (req.query.method as string) || "overwrite";
-
-      if (method === "append") {
-        if (firestoreDb) {
-          if (licensesCache.length === 0) {
-            console.log("[Import] Append Mode: RAM cache EMPTY after startup. Full Firestore hydration required.");
-            try {
-              await pullFromFirestore();
-            } catch (pullErr: any) {
-              console.warn("[Import] Firestore hydration before append warning:", pullErr);
-            }
-
-            if (licensesCache.length === 0) {
-              try {
-                const chunksColl = firestoreDb.collection("dataset_chunks");
-                const mDoc = await chunksColl.doc("manifest").get();
-                if (mDoc.exists && (mDoc.data()?.totalRecords || 0) > 0) {
-                  console.error("[Import] APPEND CANCELLED: Firestore contains existing production data but local hydration returned 0 records.");
-                  return res.status(400).json({
-                    success: false,
-                    error: "Append cancelled because existing production data could not be loaded.",
-                    message: "Append cancelled because existing production data could not be loaded."
-                  });
-                }
-              } catch (e) {
-                console.warn("[Import] Error verifying manifest during append pre-hydration check:", e);
-              }
-            }
-          } else {
-            console.log(`[Import] Mode: APPEND | Existing RAM cache: READY (${licensesCache.length} records). Skipping full Firestore pull.`);
-          }
-        }
-      }
-
-      let recordsToPersistToFirestore: LicenseRecord[] = [];
-      let finalRecords: LicenseRecord[] = [];
-      const prevRecords = method === "append" ? licensesCache.length : 0;
-      const duplicates: LicenseRecord[] = [];
-      const nonDuplicates: LicenseRecord[] = [];
-
-      if (method === "append") {
-        nonDuplicates.push(...parsedRecords);
-        const adjustedParsed = nonDuplicates.map((r, idx) => ({
-          ...r,
-          sn: String(prevRecords + 1 + idx),
-          serialNo: String(prevRecords + 1 + idx)
-        }));
-        recordsToPersistToFirestore = adjustedParsed;
-        finalRecords = [...licensesCache, ...adjustedParsed];
-      } else {
-        const seenInThisFile = new Set<string>();
-        for (const rec of parsedRecords) {
-          if (!rec.fullName && !rec.licenseNo && !rec.applicantId) {
-            nonDuplicates.push(rec);
-            continue;
-          }
-          const key = `${normalizeSearchStr(rec.applicantId)}|${normalizeSearchStr(rec.fullName)}|${normalizeSearchStr(rec.licenseNo)}|${normalizeSearchStr(rec.category)}`;
-          if (seenInThisFile.has(key)) {
-            duplicates.push(rec);
-          } else {
-            seenInThisFile.add(key);
-            nonDuplicates.push(rec);
-          }
-        }
-        
-        finalRecords = nonDuplicates.map((r, idx) => ({
-          ...r,
-          sn: String(1 + idx),
-          serialNo: String(1 + idx)
-        }));
-        recordsToPersistToFirestore = finalRecords;
-      }
-
-      const totalParsed = parsedRecords.length;
-      console.log(`Parsed ${totalParsed} rows in ${Date.now() - startTime}ms. Method: ${method}, Duplicates: ${duplicates.length}, Final size: ${finalRecords.length}`);
-
-      // Save local disk & memory state
-      saveJsonDatabaseSafe(finalRecords);
-      writeCsvDatabase(finalRecords);
-
-      licensesCache = finalRecords;
-      rebuildSearchIndexes();
-      console.log(`[Import] RAM cache incrementally updated. Total records now: ${licensesCache.length}`);
-
-      if (fs.existsSync(RESET_FLAG_PATH)) {
-        try { fs.unlinkSync(RESET_FLAG_PATH); } catch (e) {}
-      }
-
-      const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-      const nepaliDateStr = getNepaliDateStr();
-      const uploadedByStr = (req.query.uploadedBy as string) || "Administrator";
-
-      const lotEntry = {
-        id: lotCode,
-        code: lotCode,
-        name: filename,
-        fileName: filename,
-        uploadDate: todayStr,
-        nepaliDate: nepaliDateStr,
-        prevRecords: prevRecords,
-        records: nonDuplicates.length,
-        recentRecords: totalParsed,
-        duplicateFound: duplicates.length,
-        totalRecordsAfter: finalRecords.length,
-        status: "Active",
-        uploadedBy: uploadedByStr,
-        timestamp: Date.now(),
-        duplicatesList: duplicates.length > 0 ? duplicates.slice(0, 50) : []
-      };
-
-      if (method === "overwrite") {
-        uploadedLotsCache = [lotEntry];
-      } else {
-        const existingIdx = uploadedLotsCache.findIndex(l => (l.id === lotCode || l.code === lotCode));
-        if (existingIdx !== -1) {
-          const existing = uploadedLotsCache[existingIdx];
-          uploadedLotsCache[existingIdx] = {
-            ...existing,
-            records: (existing.records || 0) + nonDuplicates.length,
-            recentRecords: (existing.recentRecords || 0) + totalParsed,
-            duplicateFound: (existing.duplicateFound || 0) + duplicates.length,
-            totalRecordsAfter: finalRecords.length,
-            uploadDate: todayStr,
-            nepaliDate: nepaliDateStr,
-            timestamp: Date.now()
-          };
-        } else {
-          uploadedLotsCache.push(lotEntry);
-        }
-      }
-
-      synchronizeDashboardAndLots();
-
-      // Write directly and synchronously to Firestore as Single Source of Truth BEFORE responding
-      let firestoreSyncResult: { success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string } = { success: true, uploadedChunks: 0 };
-      if (firestoreDb) {
-        if (method === "overwrite") {
-          console.log(`[Import] Mode: OVERWRITE | Persisting ${recordsToPersistToFirestore.length} records to Firestore...`);
-          try {
-            await clearFirestoreCollection();
-          } catch (clearErr: any) {
-            console.error("[Import] Error clearing firestore collection:", clearErr);
-          }
-          firestoreSyncResult = await pushToFirestoreInBatches(recordsToPersistToFirestore, false);
-        } else {
-          console.log(`[Import] Mode: APPEND | Incrementally persisting ${recordsToPersistToFirestore.length} new records to Firestore...`);
-          firestoreSyncResult = await pushToFirestoreInBatches(recordsToPersistToFirestore, true);
-        }
-        await pushLotsToFirestore().catch(e => console.error("[Import] pushLotsToFirestore error:", e));
-        console.log("[Import] Firestore synchronization complete.", firestoreSyncResult);
-      }
-
-      if (!firestoreSyncResult.success) {
-        return res.json({
-          success: true,
-          warning: `Imported locally, but Firestore sync hit an issue: ${firestoreSyncResult.error || "Partial upload"}`,
-          uploadedChunks: firestoreSyncResult.uploadedChunks,
-          failedChunk: firestoreSyncResult.failedChunk,
-          remainingChunks: firestoreSyncResult.remainingChunks,
-          message: `Imported ${nonDuplicates.length} new records. skipped ${duplicates.length} duplicate records successfully!`,
-          total: nonDuplicates.length,
-          totalInDb: finalRecords.length,
-          prevRecords: prevRecords,
-          recentRecords: totalParsed,
-          duplicateFound: duplicates.length,
-          duplicatesList: duplicates,
-          uploadedLots: uploadedLotsCache,
-          lotEntry,
-          timeMs: Date.now() - startTime,
-        });
-      }
-
-      return res.json({
-        success: true,
-        message: `Imported ${nonDuplicates.length} new records. skipped ${duplicates.length} duplicate records successfully!`,
-        total: nonDuplicates.length,
-        totalInDb: finalRecords.length,
-        prevRecords: prevRecords,
-        recentRecords: totalParsed,
-        duplicateFound: duplicates.length,
-        duplicatesList: duplicates,
-        uploadedLots: uploadedLotsCache,
-        lotEntry,
-        timeMs: Date.now() - startTime,
-      });
-
-    } catch (error: any) {
-      console.error("[Import] Top-level handler catch:", error);
-      return res.status(500).json({ 
-        success: false, 
-        error: error.message || String(error),
-        message: error.message || String(error),
-        stack: process.env.NODE_ENV !== "production" ? error.stack : undefined 
-      });
-    } finally {
-      isImportingLock = false;
+// Clean up old jobs after 1 hour
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of importJobs.entries()) {
+    if (now - job.createdAt > 3600000) {
+      importJobs.delete(id);
     }
   }
-);
+}, 300000);
+
+async function executeImportJob(
+  jobId: string,
+  buffer: Buffer,
+  filename: string,
+  method: string,
+  requestedLotCode: string,
+  uploadedBy: string
+) {
+  const startTime = Date.now();
+  const job = importJobs.get(jobId);
+  if (!job) return;
+
+  try {
+    job.message = "Parsing spreadsheet buffer...";
+    job.progress = 10;
+
+    let workbook: xlsx.WorkBook;
+    try {
+      workbook = xlsx.read(buffer, { type: "buffer" });
+    } catch (parseErr: any) {
+      job.status = "failed";
+      job.error = `Failed to parse Excel file: ${parseErr.message || parseErr}`;
+      return;
+    }
+
+    const firstSheetName = workbook.SheetNames ? workbook.SheetNames[0] : "";
+    if (!firstSheetName) {
+      job.status = "failed";
+      job.error = "The uploaded file contains no sheets.";
+      return;
+    }
+
+    const worksheet = workbook.Sheets[firstSheetName];
+    const rawRows = xlsx.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
+
+    if (!rawRows || rawRows.length < 2) {
+      job.status = "failed";
+      job.error = "File is empty or contains no data rows.";
+      return;
+    }
+
+    // Match column headers
+    const headerRow = (rawRows[0] || []).map((h: any) => normalizeSearchStr(String(h || "")));
+    let snCol = -1, applicantIdCol = -1, fullNameCol = -1, licenseNoCol = -1, categoryCol = -1;
+    let oldCodeCol = -1, newCodeCol = -1, visitDateCol = -1, receivedByCol = -1;
+
+    headerRow.forEach((h: string, idx: number) => {
+      if (h.includes("sn") || h.includes("s.n") || h.includes("serial")) snCol = idx;
+      if (h.includes("applicant") || h.includes("appl")) applicantIdCol = idx;
+      if (h.includes("name") || h.includes("full")) fullNameCol = idx;
+      if (h.includes("license") || h.includes("licence") || h.includes("lic")) licenseNoCol = idx;
+      if (h.includes("cat") || h.includes("category")) categoryCol = idx;
+      if (h.includes("old") || h.includes("oldcode")) oldCodeCol = idx;
+      if (h.includes("new") || h.includes("newcode")) newCodeCol = idx;
+      if (h.includes("visit") || h.includes("date")) visitDateCol = idx;
+      if (h.includes("receive") || h.includes("by") || h.includes("user")) receivedByCol = idx;
+    });
+
+    if (applicantIdCol === -1 && licenseNoCol === -1) {
+      job.status = "failed";
+      job.error = "Could not find 'APPLICANT ID' or 'LICENSE NO' column in your sheet header.";
+      return;
+    }
+
+    const parsedRecords: LicenseRecord[] = [];
+    for (let i = 1; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!row || row.length === 0) continue;
+      const hasData = row.some((cell: any) => cell !== undefined && cell !== null && String(cell).trim() !== "");
+      if (!hasData) continue;
+
+      const record: LicenseRecord = {
+        sn: snCol !== -1 && row[snCol] !== undefined ? String(row[snCol]).trim() : String(i),
+        serialNo: snCol !== -1 && row[snCol] !== undefined ? String(row[snCol]).trim() : String(i),
+        applicantId: applicantIdCol !== -1 && row[applicantIdCol] !== undefined ? String(row[applicantIdCol]).trim() : "",
+        fullName: fullNameCol !== -1 && row[fullNameCol] !== undefined ? String(row[fullNameCol]).trim() : "",
+        licenseNo: licenseNoCol !== -1 && row[licenseNoCol] !== undefined ? String(row[licenseNoCol]).trim() : "",
+        category: categoryCol !== -1 && row[categoryCol] !== undefined ? String(row[categoryCol]).trim() : "",
+        oldCode: oldCodeCol !== -1 && row[oldCodeCol] !== undefined ? String(row[oldCodeCol]).trim() : "",
+        newCode: newCodeCol !== -1 && row[newCodeCol] !== undefined ? String(row[newCodeCol]).trim() : "",
+        visitDate: visitDateCol !== -1 && row[visitDateCol] !== undefined ? String(row[visitDateCol]).trim() : "",
+        receivedBy: receivedByCol !== -1 && row[receivedByCol] !== undefined ? String(row[receivedByCol]).trim() : "",
+        lotCode: ""
+      };
+      parsedRecords.push(record);
+    }
+
+    if (parsedRecords.length === 0) {
+      job.status = "failed";
+      job.error = "No valid data rows could be parsed from the file.";
+      return;
+    }
+
+    job.message = `Parsed ${parsedRecords.length.toLocaleString()} rows. Checking database...`;
+    job.progress = 25;
+
+    // Read authoritative state from Firestore manifest
+    let existingTotalRecords = 0;
+    let existingChunkCount = 0;
+    if (firestoreDb) {
+      try {
+        const mDoc = await firestoreDb.collection("dataset_chunks").doc("manifest").get();
+        if (mDoc.exists) {
+          const mData = mDoc.data();
+          existingTotalRecords = mData?.totalRecords || 0;
+          existingChunkCount = mData?.chunkCount || 0;
+        }
+      } catch (e) {
+        console.warn("[ImportJob] Manifest read error:", e);
+      }
+    }
+
+    // Hydrate licensesCache if RAM is behind Firestore
+    if (firestoreDb && licensesCache.length < existingTotalRecords) {
+      job.message = "Hydrating existing dataset from cloud...";
+      try {
+        await pullFromFirestore();
+      } catch (pullErr) {
+        console.warn("[ImportJob] Pre-import pull error:", pullErr);
+      }
+    }
+
+    const isAppend = method === "append";
+    const prevRecords = isAppend ? Math.max(existingTotalRecords, licensesCache.length) : 0;
+
+    // Determine Lot Code
+    let lotCode = requestedLotCode;
+    const lowerFilename = filename.toLowerCase();
+    if (lowerFilename.includes("2nd-lot") || lowerFilename.includes("2nd_lot")) {
+      lotCode = "2nd-LOT";
+    } else if (lowerFilename.includes("1st-lot") || lowerFilename.includes("1st_lot")) {
+      lotCode = "1st-LOT";
+    } else if (lowerFilename.includes("3rd-lot") || lowerFilename.includes("3rd_lot")) {
+      lotCode = "3rd-LOT";
+    } else if (!lotCode || lotCode === "LOT-2083-IMPORT") {
+      const lotIndex = (uploadedLotsCache.length || 0) + 1;
+      const s = ["th", "st", "nd", "rd"];
+      const v = lotIndex % 100;
+      const suffix = s[(v - 20) % 10] || s[v] || s[0];
+      lotCode = `${lotIndex}${suffix}-LOT`;
+    }
+
+    // Duplicate detection against existing licensesCache
+    job.message = "Detecting duplicate records...";
+    job.progress = 40;
+
+    const existingKeys = new Set<string>();
+    if (isAppend) {
+      for (const rec of licensesCache) {
+        if (rec.applicantId || rec.licenseNo || rec.fullName) {
+          const k = `${normalizeSearchStr(rec.applicantId)}|${normalizeSearchStr(rec.fullName)}|${normalizeSearchStr(rec.licenseNo)}|${normalizeSearchStr(rec.category)}`;
+          existingKeys.add(k);
+        }
+      }
+    }
+
+    const duplicates: LicenseRecord[] = [];
+    const nonDuplicates: LicenseRecord[] = [];
+    const batchKeys = new Set<string>();
+
+    for (const rec of parsedRecords) {
+      if (!rec.fullName && !rec.licenseNo && !rec.applicantId) {
+        nonDuplicates.push(rec);
+        continue;
+      }
+      const k = `${normalizeSearchStr(rec.applicantId)}|${normalizeSearchStr(rec.fullName)}|${normalizeSearchStr(rec.licenseNo)}|${normalizeSearchStr(rec.category)}`;
+      if (existingKeys.has(k) || batchKeys.has(k)) {
+        duplicates.push(rec);
+      } else {
+        batchKeys.add(k);
+        nonDuplicates.push(rec);
+      }
+    }
+
+    if (isAppend && nonDuplicates.length === 0) {
+      job.status = "completed";
+      job.progress = 100;
+      job.message = "Yo Database Pahile Nai Sync Garieko Chha (It is already synced !!!)";
+      job.result = {
+        success: true,
+        alreadySynced: true,
+        message: "यो डाटाबेस पहिले नै सिङ्क गरिएको छ (It is already synced !!!)",
+        total: 0,
+        totalInDb: licensesCache.length,
+        prevRecords: licensesCache.length,
+        recentRecords: parsedRecords.length,
+        duplicateFound: duplicates.length,
+        duplicatesList: duplicates.slice(0, 50),
+        uploadedLots: uploadedLotsCache,
+        timeMs: Date.now() - startTime
+      };
+      return;
+    }
+
+    // Assign continuous SNs and lot code to nonDuplicates
+    const assignedRecords = nonDuplicates.map((r, idx) => ({
+      ...r,
+      sn: String(prevRecords + 1 + idx),
+      serialNo: String(prevRecords + 1 + idx),
+      lotCode: lotCode
+    }));
+
+    job.message = `Writing ${assignedRecords.length.toLocaleString()} records to cloud storage...`;
+    job.progress = 60;
+
+    // Push new chunks to Firestore
+    let firestoreSyncResult = { success: true, uploadedChunks: 0, error: undefined as string | undefined };
+    if (firestoreDb) {
+      if (!isAppend) {
+        await clearFirestoreCollection();
+      }
+      firestoreSyncResult = await pushToFirestoreInBatches(assignedRecords, isAppend);
+    }
+
+    // Build Lot Entry
+    const todayStr = new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+    const nepaliDateStr = getNepaliDateStr();
+    const finalTotalRecords = prevRecords + assignedRecords.length;
+
+    const lotEntry = {
+      id: lotCode,
+      code: lotCode,
+      name: filename,
+      fileName: filename,
+      uploadDate: todayStr,
+      nepaliDate: nepaliDateStr,
+      prevRecords: prevRecords,
+      records: assignedRecords.length,
+      recentRecords: parsedRecords.length,
+      duplicateFound: duplicates.length,
+      totalRecordsAfter: finalTotalRecords,
+      status: "Active",
+      uploadedBy: uploadedBy || "Administrator",
+      timestamp: Date.now(),
+      duplicatesList: duplicates.length > 0 ? duplicates.slice(0, 50) : []
+    };
+
+    // Update Lot Cache
+    if (!isAppend) {
+      uploadedLotsCache = [lotEntry];
+    } else {
+      const existingIdx = uploadedLotsCache.findIndex(l => (l.id === lotCode || l.code === lotCode));
+      if (existingIdx !== -1) {
+        uploadedLotsCache[existingIdx] = {
+          ...uploadedLotsCache[existingIdx],
+          records: (uploadedLotsCache[existingIdx].records || 0) + assignedRecords.length,
+          recentRecords: (uploadedLotsCache[existingIdx].recentRecords || 0) + parsedRecords.length,
+          duplicateFound: (uploadedLotsCache[existingIdx].duplicateFound || 0) + duplicates.length,
+          totalRecordsAfter: finalTotalRecords,
+          uploadDate: todayStr,
+          nepaliDate: nepaliDateStr,
+          timestamp: Date.now()
+        };
+      } else {
+        uploadedLotsCache.push(lotEntry);
+      }
+    }
+
+    // Save lot list to Firestore & local disk
+    if (firestoreDb) {
+      await pushLotsToFirestore().catch(e => console.error("[ImportJob] Error pushing lots to Firestore:", e));
+    }
+    try {
+      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+    } catch (e) {}
+
+    // Update RAM Cache & Local Disk
+    job.message = "Updating search indexes...";
+    job.progress = 90;
+
+    const finalCacheRecords = isAppend ? [...licensesCache, ...assignedRecords] : assignedRecords;
+    licensesCache = finalCacheRecords;
+    saveJsonDatabaseSafe(licensesCache);
+    writeCsvDatabase(licensesCache);
+    rebuildSearchIndexes();
+
+    if (fs.existsSync(RESET_FLAG_PATH)) {
+      try { fs.unlinkSync(RESET_FLAG_PATH); } catch (e) {}
+    }
+
+    job.status = "completed";
+    job.progress = 100;
+    job.message = `Successfully imported ${assignedRecords.length.toLocaleString()} records. Total dataset now: ${finalTotalRecords.toLocaleString()}`;
+    job.result = {
+      success: true,
+      message: `Successfully uploaded & parsed ${assignedRecords.length.toLocaleString()} records from "${filename}"!`,
+      total: assignedRecords.length,
+      totalInDb: finalTotalRecords,
+      prevRecords: prevRecords,
+      recentRecords: parsedRecords.length,
+      duplicateFound: duplicates.length,
+      duplicatesList: duplicates.slice(0, 50),
+      uploadedLots: uploadedLotsCache,
+      lotEntry,
+      timeMs: Date.now() - startTime,
+      warning: firestoreSyncResult.error ? `Firestore issue: ${firestoreSyncResult.error}` : undefined
+    };
+    console.log(`[ImportJob ${jobId}] Finished in ${Date.now() - startTime}ms. Final total: ${finalTotalRecords}`);
+  } catch (err: any) {
+    console.error(`[ImportJob ${jobId}] Failed with error:`, err);
+    job.status = "failed";
+    job.error = err.message || String(err);
+  }
+}
+
+app.post("/api/import", express.raw({ type: "*/*", limit: "100mb" }), async (req, res) => {
+  try {
+    const filename = (req.query.filename as string) || "imported_spreadsheet.xlsx";
+    const method = (req.query.method as string) || "append";
+    const requestedLotCode = (req.query.lotCode as string) || "";
+    const uploadedBy = (req.query.uploadedBy as string) || "Administrator";
+    const buffer = req.body;
+
+    if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No file content uploaded.",
+        message: "No file content uploaded."
+      });
+    }
+
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    importJobs.set(jobId, {
+      id: jobId,
+      status: "processing",
+      progress: 5,
+      message: "File received. Processing import...",
+      filename,
+      method,
+      lotCode: requestedLotCode,
+      createdAt: Date.now()
+    });
+
+    // Start background processing
+    executeImportJob(jobId, buffer, filename, method, requestedLotCode, uploadedBy).catch(err => {
+      console.error(`[ImportJob ${jobId}] Unhandled error:`, err);
+      const job = importJobs.get(jobId);
+      if (job) {
+        job.status = "failed";
+        job.error = err.message || String(err);
+      }
+    });
+
+    return res.json({
+      success: true,
+      status: "processing",
+      jobId,
+      message: "Import job started."
+    });
+  } catch (err: any) {
+    console.error("[Import] Error initiating upload job:", err);
+    return res.status(500).json({ success: false, error: err.message || String(err) });
+  }
+});
+
+app.get("/api/import/status", (req, res) => {
+  const jobId = req.query.jobId as string;
+  if (!jobId || !importJobs.has(jobId)) {
+    return res.status(404).json({ success: false, error: "Import job not found or expired." });
+  }
+  const job = importJobs.get(jobId)!;
+  if (job.status === "completed") {
+    return res.json({
+      success: true,
+      status: "completed",
+      progress: 100,
+      message: job.message,
+      result: job.result
+    });
+  } else if (job.status === "failed") {
+    return res.json({
+      success: false,
+      status: "failed",
+      error: job.error || "Import failed"
+    });
+  } else {
+    return res.json({
+      success: true,
+      status: "processing",
+      progress: job.progress,
+      message: job.message
+    });
+  }
+});
 
 // ==========================================
 // FIREBASE SYNC & CENTRAL DATABASE ENDPOINTS

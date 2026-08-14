@@ -517,7 +517,7 @@ export default function App() {
     } catch (e) {}
 
     try {
-      const response = await fetch(`/api/import?filename=${encodeURIComponent(file.name)}&method=${loadMethod}&lotCode=${lotCode}`, {
+      const initialRes = await fetch(`/api/import?filename=${encodeURIComponent(file.name)}&method=${loadMethod}&lotCode=${lotCode}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/octet-stream",
@@ -525,8 +525,36 @@ export default function App() {
         body: file,
       });
 
-      const data = await response.json();
-      if (data.success) {
+      const initialData = await initialRes.json();
+      if (!initialData.success) {
+        setUploadStatus({
+          success: false,
+          message: initialData.error || "An error occurred during file upload.",
+        });
+        return;
+      }
+
+      let data = initialData;
+      if (initialData.status === "processing" && initialData.jobId) {
+        const jobId = initialData.jobId;
+        while (true) {
+          await new Promise(r => setTimeout(r, 1000));
+          const statusRes = await fetch(`/api/import/status?jobId=${jobId}`);
+          const statusData = await statusRes.json();
+          if (statusData.status === "completed") {
+            data = statusData.result || {};
+            break;
+          } else if (statusData.status === "failed") {
+            setUploadStatus({
+              success: false,
+              message: statusData.error || "Import job failed.",
+            });
+            return;
+          }
+        }
+      }
+
+      if (data && data.success) {
         if (Array.isArray(data.uploadedLots) && data.uploadedLots.length > 0) {
           try {
             localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(data.uploadedLots));
@@ -536,7 +564,7 @@ export default function App() {
           success: true,
           message: data.alreadySynced
             ? "यो डाटाबेस पहिले नै सिङ्क गरिएको छ (It is already synced !!!)"
-            : `Successfully uploaded & parsed ${data.total.toLocaleString()} records from "${file.name}"!`,
+            : `Successfully uploaded & parsed ${(data.total || 0).toLocaleString()} records from "${file.name}"!`,
           count: data.total,
           fileName: file.name,
           method: loadMethod,
@@ -555,7 +583,7 @@ export default function App() {
       } else {
         setUploadStatus({
           success: false,
-          message: data.error || "An error occurred while parsing the spreadsheet file.",
+          message: data?.error || "An error occurred while parsing the spreadsheet file.",
         });
       }
     } catch (e: any) {

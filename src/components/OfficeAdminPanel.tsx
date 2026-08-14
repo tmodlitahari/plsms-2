@@ -636,19 +636,10 @@ export default function OfficeAdminPanel({
     }
   };
 
-  // Keep localStorage and server database updated on state change
+  // Keep localStorage updated on state change
   useEffect(() => {
     if (uploadedLots.length > 0) {
       localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(uploadedLots));
-      
-      // Auto-save uploaded lots list to server so they persist in the central database
-      if (hasLoadedServerLots.current) {
-        fetch("/api/uploaded-lots", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ uploadedLots })
-        }).catch(e => console.error("Error backing up uploaded lots to server:", e));
-      }
     }
   }, [uploadedLots]);
 
