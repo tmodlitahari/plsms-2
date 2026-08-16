@@ -146,13 +146,28 @@ function recalculateStats() {
 
 function saveJsonDatabaseSafe(records: LicenseRecord[]) {
   try {
-    const tmpPath = `${JSON_DB_PATH}.tmp`;
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const tmpPath = `${JSON_DB_PATH}.tmp.${process.pid}.${Date.now()}`;
     const jsonStr = JSON.stringify(records, (key, value) => {
       if (key === "_nA" || key === "_nL" || key === "_nN") return undefined;
       return value;
     });
-    fs.writeFileSync(tmpPath, jsonStr, "utf-8");
+
+    const fd = fs.openSync(tmpPath, "w");
+    fs.writeSync(fd, jsonStr, 0, "utf-8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+
     fs.renameSync(tmpPath, JSON_DB_PATH);
+
+    // Keep a reliable .bak file as an extra safety layer
+    try {
+      const bakPath = `${JSON_DB_PATH}.bak`;
+      fs.copyFileSync(JSON_DB_PATH, bakPath);
+    } catch (e) {}
+
     if (global.gc) {
       try { (global as any).gc(); } catch (e) {}
     }
@@ -996,18 +1011,31 @@ async function pullLotsFromFirestore() {
 function writeCsvDatabase(records: LicenseRecord[]) {
   setImmediate(() => {
     try {
-      const stream = fs.createWriteStream(CSV_DB_PATH, { encoding: "utf-8" });
-      stream.write("SN,APPLICANT ID,FULL NAME,LICENSE NO,CATEGORY,OLD CODE,NEW CODE,VISIT DATE,RECEIVED BY\n");
-      for (let i = 0; i < records.length; i++) {
-        const r = records[i];
-        stream.write(`"${(r.sn || "").replace(/"/g, '""')}","${(r.applicantId || "").replace(/"/g, '""')}","${(r.fullName || "").replace(/"/g, '""')}","${(r.licenseNo || "").replace(/"/g, '""')}","${(r.category || "").replace(/"/g, '""')}","${(r.oldCode || "").replace(/"/g, '""')}","${(r.newCode || "").replace(/"/g, '""')}","${(r.visitDate || "").replace(/"/g, '""')}","${(r.receivedBy || "").replace(/"/g, '""')}"\n`);
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
       }
-      stream.end();
+      const tmpPath = `${CSV_DB_PATH}.tmp.${process.pid}.${Date.now()}`;
+      const fd = fs.openSync(tmpPath, "w");
+      fs.writeSync(fd, "SN,APPLICANT ID,FULL NAME,LICENSE NO,CATEGORY,OLD CODE,NEW CODE,VISIT DATE,RECEIVED BY,LOT CODE\n", undefined, "utf-8");
+
+      const CHUNK = 5000;
+      for (let i = 0; i < records.length; i += CHUNK) {
+        let chunkStr = "";
+        const end = Math.min(i + CHUNK, records.length);
+        for (let j = i; j < end; j++) {
+          const r = records[j];
+          chunkStr += `"${(r.sn || "").replace(/"/g, '""')}","${(r.applicantId || "").replace(/"/g, '""')}","${(r.fullName || "").replace(/"/g, '""')}","${(r.licenseNo || "").replace(/"/g, '""')}","${(r.category || "").replace(/"/g, '""')}","${(r.oldCode || "").replace(/"/g, '""')}","${(r.newCode || "").replace(/"/g, '""')}","${(r.visitDate || "").replace(/"/g, '""')}","${(r.receivedBy || "").replace(/"/g, '""')}","${(r.lotCode || "").replace(/"/g, '""')}"\n`;
+        }
+        fs.writeSync(fd, chunkStr, undefined, "utf-8");
+      }
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fs.renameSync(tmpPath, CSV_DB_PATH);
       if (global.gc) {
         try { (global as any).gc(); } catch (e) {}
       }
     } catch (e) {
-      console.error("Error writing CSV database in background:", e);
+      console.error("Error writing CSV database atomically:", e);
     }
   });
 }
@@ -1017,7 +1045,7 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
     const parsed = JSON.parse(rawData);
     if (Array.isArray(parsed)) return parsed;
   } catch (e) {
-    console.warn("[JSON Recovery] Standard JSON.parse failed. Attempting automated recovery of truncated JSON...");
+    // Expected on truncated JSON files
   }
 
   try {
@@ -1039,7 +1067,7 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
       try {
         const parsed = JSON.parse(candidate);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          console.log(`[JSON Recovery] Successfully recovered ${parsed.length.toLocaleString()} valid records from truncated JSON (cut off at char ${lastBraceIndex}).`);
+          console.log(`[JSON Recovery] Successfully recovered ${parsed.length.toLocaleString()} valid records from truncated JSON backup.`);
           return parsed;
         }
       } catch (err) {
@@ -1047,7 +1075,7 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
       }
     }
   } catch (recErr) {
-    console.error("[JSON Recovery] Error during truncated JSON recovery:", recErr);
+    console.warn("[JSON Recovery] Could not recover truncated JSON:", recErr);
   }
 
   return null;
@@ -1056,7 +1084,7 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
 function loadDatabaseFromCsvFallback(): LicenseRecord[] {
   if (!fs.existsSync(CSV_DB_PATH)) return [];
   try {
-    console.log("[CSV Recovery] Reading database from license_db.csv fallback...");
+    console.log("[CSV Database] Reading database from license_db.csv...");
     const content = fs.readFileSync(CSV_DB_PATH, "utf-8");
     const lines = content.split(/\r?\n/);
     if (lines.length <= 1) return [];
@@ -1093,14 +1121,14 @@ function loadDatabaseFromCsvFallback(): LicenseRecord[] {
           newCode: values[6] || "",
           visitDate: values[7] || "",
           receivedBy: values[8] || "",
-          lotCode: ""
+          lotCode: values[9] || ""
         });
       }
     }
-    console.log(`[CSV Recovery] Successfully loaded ${records.length.toLocaleString()} records from CSV database.`);
+    console.log(`[CSV Database] Successfully loaded ${records.length.toLocaleString()} records from CSV database.`);
     return records;
   } catch (err) {
-    console.error("[CSV Recovery] Error parsing CSV database file:", err);
+    console.error("[CSV Database] Error parsing CSV database file:", err);
     return [];
   }
 }
@@ -1108,49 +1136,61 @@ function loadDatabaseFromCsvFallback(): LicenseRecord[] {
 // Load database into cache on startup
 function loadDatabaseIntoCache() {
   try {
-    let parsed: any[] | null = null;
-    let loadedFromCorruptFile = false;
+    let jsonRecords: LicenseRecord[] = [];
+    let isCorruptedJson = false;
 
     if (fs.existsSync(JSON_DB_PATH)) {
       console.log("Loading license database into memory...");
       const startTime = Date.now();
-      const rawData = fs.readFileSync(JSON_DB_PATH, "utf-8");
-      
       try {
-        parsed = JSON.parse(rawData);
-      } catch (jsonErr: any) {
-        console.warn(`[Database] Error reading database JSON: ${jsonErr.message || jsonErr}. Attempting recovery...`);
-        parsed = parseCorruptedJsonArray(rawData);
-        if (parsed) {
-          loadedFromCorruptFile = true;
+        const rawData = fs.readFileSync(JSON_DB_PATH, "utf-8");
+        try {
+          const parsed = JSON.parse(rawData);
+          if (Array.isArray(parsed)) {
+            jsonRecords = parsed.map((r: any) => ({
+              ...r,
+              lotCode: r.lotCode || ""
+            }));
+          }
+        } catch (jsonErr: any) {
+          console.warn(`[Database] Notice: Local JSON file was incomplete or truncated. Attempting recovery and checking CSV backup...`);
+          isCorruptedJson = true;
+          const recovered = parseCorruptedJsonArray(rawData);
+          if (Array.isArray(recovered)) {
+            jsonRecords = recovered.map((r: any) => ({
+              ...r,
+              lotCode: r.lotCode || ""
+            }));
+          }
         }
+      } catch (e) {
+        console.warn("[Database] Error reading local JSON file:", e);
       }
-
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        licensesCache = parsed.map((r: any) => ({
-          ...r,
-          lotCode: r.lotCode || ""
-        }));
-        console.log(`Successfully loaded ${licensesCache.length.toLocaleString()} licenses in ${Date.now() - startTime}ms.`);
-        
-        if (loadedFromCorruptFile) {
-          console.log("[Database] Re-saving repaired database to disk cleanly...");
-          saveJsonDatabaseSafe(licensesCache);
-        }
+      if (jsonRecords.length > 0) {
+        console.log(`Loaded ${jsonRecords.length.toLocaleString()} licenses from JSON in ${Date.now() - startTime}ms.`);
       }
     }
 
-    // Fallback to CSV database if JSON load returned 0 records or failed
-    if (licensesCache.length === 0 && fs.existsSync(CSV_DB_PATH)) {
-      const csvRecords = loadDatabaseFromCsvFallback();
-      if (csvRecords.length > 0) {
-        licensesCache = csvRecords;
+    // Check CSV backup as well
+    let csvRecords: LicenseRecord[] = [];
+    if (fs.existsSync(CSV_DB_PATH)) {
+      csvRecords = loadDatabaseFromCsvFallback();
+    }
+
+    // Always choose whichever valid backup contains the most complete dataset
+    if (csvRecords.length > jsonRecords.length) {
+      console.log(`[Database] CSV backup contains more records (${csvRecords.length.toLocaleString()}) than JSON (${jsonRecords.length.toLocaleString()}). Using CSV dataset.`);
+      licensesCache = csvRecords;
+      saveJsonDatabaseSafe(licensesCache);
+    } else if (jsonRecords.length > 0) {
+      licensesCache = jsonRecords;
+      if (isCorruptedJson) {
+        console.log("[Database] Re-saving cleaned JSON database to disk...");
         saveJsonDatabaseSafe(licensesCache);
       }
-    }
-
-    if (licensesCache.length === 0 && !fs.existsSync(JSON_DB_PATH) && !fs.existsSync(CSV_DB_PATH)) {
-      console.log("No existing database found. Initializing empty database.");
+    } else {
+      licensesCache = [];
+      console.log("No local database records found. Cache initialized empty.");
     }
 
     rebuildSearchIndexes();
@@ -1629,7 +1669,7 @@ async function executeImportJob(
     job.progress = 60;
 
     // Push new chunks to Firestore
-    let firestoreSyncResult = { success: true, uploadedChunks: 0, error: undefined as string | undefined };
+    let firestoreSyncResult: { success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string } = { success: true, uploadedChunks: 0 };
     if (firestoreDb) {
       if (!isAppend) {
         await clearFirestoreCollection();
