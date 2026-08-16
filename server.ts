@@ -1327,10 +1327,9 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
     }
 
     const normQuery = normalizeSearchStr(queryStr);
-    const isExact = exact === "true";
     const matchedSet = new Set<LicenseRecord>();
 
-    // 1. Instant O(1) Hash Map Lookups for License Number and Applicant ID
+    // 1. Instant O(1) Hash Map Lookups for EXACT License Number and EXACT Applicant ID
     const licMatches = licenseNoIndex.get(normQuery);
     if (licMatches) {
       for (let i = 0; i < licMatches.length; i++) {
@@ -1351,8 +1350,8 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
       }
     }
 
-    // 2. If O(1) map didn't yield matches, or if non-exact / name search is allowed
-    if (!isExact || matchedSet.size === 0) {
+    // 2. Fallback check: ONLY match if License Number or Applicant ID matches exactly
+    if (matchedSet.size === 0) {
       const len = licensesCache.length;
       for (let i = 0; i < len; i++) {
         const rec = licensesCache[i];
@@ -1360,26 +1359,11 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
           continue;
         }
 
-        if (matchedSet.has(rec)) continue;
-
         const normAppId = rec._nA || (rec._nA = normalizeSearchStr(rec.applicantId));
         const normLicNo = rec._nL || (rec._nL = normalizeSearchStr(rec.licenseNo));
-        const normName = rec._nN || (rec._nN = normalizeSearchStr(rec.fullName));
 
-        let isMatch = false;
-        if (isExact) {
-          const matchApplicantId = normAppId === normQuery || (normQuery.length >= 4 && normAppId.includes(normQuery));
-          const matchLicenseNo = normLicNo === normQuery || (normQuery.length >= 4 && normLicNo.includes(normQuery));
-          const matchName = normQuery.length >= 3 && normName.includes(normQuery);
-          isMatch = matchApplicantId || matchLicenseNo || matchName;
-        } else {
-          const matchApplicantId = normAppId.includes(normQuery);
-          const matchLicenseNo = normLicNo.includes(normQuery);
-          const matchFullName = normName.includes(normQuery);
-          isMatch = matchApplicantId || matchLicenseNo || matchFullName;
-        }
-
-        if (isMatch) {
+        // Strict exact match on Applicant ID or License Number only
+        if (normLicNo === normQuery || normAppId === normQuery) {
           matchedSet.add(rec);
         }
       }

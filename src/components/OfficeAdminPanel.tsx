@@ -1294,7 +1294,16 @@ export default function OfficeAdminPanel({
             </div>
 
             <div className="space-y-1">
-              <label className="block text-[11px] uppercase tracking-wider text-slate-500">पासवर्ड (PASSWORD):</label>
+              <div className="flex items-center justify-between">
+                <label className="block text-[11px] uppercase tracking-wider text-slate-500">पासवर्ड (PASSWORD):</label>
+                <button
+                  type="button"
+                  onClick={handleResetPasswordToDefault}
+                  className="text-[10px] text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer"
+                >
+                  पासवर्ड बिर्सनुभयो? (Forgot Password?)
+                </button>
+              </div>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
@@ -1320,6 +1329,20 @@ export default function OfficeAdminPanel({
             >
               लगइन गर्नुहोस् (Secure Login)
             </button>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-left flex items-center justify-between gap-2">
+              <div className="text-[11px] text-slate-600">
+                <span className="font-bold text-slate-700">पूर्वनिर्धारित लगइन (Default Login):</span>
+                <span className="block text-[10px] text-slate-500 font-mono">tmodlitahari@gmail.com / Password@2083</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetPasswordToDefault}
+                className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold rounded transition cursor-pointer shrink-0"
+              >
+                Auto-fill
+              </button>
+            </div>
           </form>
 
           <div className="text-[10px] text-slate-400 font-medium pt-2 border-t border-slate-100 flex justify-between">
@@ -1426,14 +1449,14 @@ export default function OfficeAdminPanel({
             <div className="bg-sky-50 border border-sky-200 rounded-xl p-4 flex items-start gap-3 text-left">
               <span className="text-lg md:text-xl shrink-0">🔍</span>
               <p className="text-xs md:text-sm text-sky-800 font-semibold leading-relaxed font-sans">
-                <strong>प्रशासक जाँच मोड (ADMIN SEARCH/UPDATE):</strong> यहाँबाट कुनै पनि लाइसेन्स नम्बर वा नाम खोज्नुहोस् र बुझानी अवस्था (Handover Status) लाई सिधै अद्यावधिक गर्नुहोस्।
+                <strong>प्रशासक जाँच मोड (ADMIN SEARCH/UPDATE):</strong> यहाँबाट कुनै पनि लाइसेन्स नम्बर वा आवेदक ID खोज्नुहोस् र बुझानी अवस्था (Handover Status) लाई सिधै अद्यावधिक गर्नुहोस्।
               </p>
             </div>
 
             <form onSubmit={handleAdminSearch} className="space-y-4 text-left">
               <div className="space-y-1.5">
                 <label className="block text-[11px] md:text-xs font-extrabold text-slate-500 uppercase px-0.5">
-                  सवारी चालक अनुमति पत्र नम्बर प्रविष्ट गर्नुहोस् ENTER LICENSE NO: XX-XX-XXXXXXXX
+                  सवारी चालक अनुमति पत्र नम्बर वा आवेदक ID प्रविष्ट गर्नुहोस् ENTER LICENSE NO / APPLICANT ID:
                 </label>
                 <div className="flex flex-col md:flex-row gap-3">
                   <div className="relative flex-1">
