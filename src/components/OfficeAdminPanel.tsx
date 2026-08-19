@@ -425,41 +425,8 @@ export default function OfficeAdminPanel({
   // Database center sub-tabs: "upload" | "users" | "logs" | "password"
   const [activeSubTab, setActiveSubTab] = useState<"upload" | "users" | "logs" | "password">("upload");
 
-  // State for toggling and browsing database records
-  const [tableMode, setTableMode] = useState<"lots" | "records" | "available">("lots");
-  const [browseRecords, setBrowseRecords] = useState<LicenseRecord[]>([]);
-  const [browseTotal, setBrowseTotal] = useState(0);
-  const [browsePage, setBrowsePage] = useState(1);
-  const [browseLimit, setBrowseLimit] = useState(10);
-  const [browseSearch, setBrowseSearch] = useState("");
-  const [isBrowseLoading, setIsBrowseLoading] = useState(false);
-
   const [selectedLotDuplicates, setSelectedLotDuplicates] = useState<LicenseRecord[] | null>(null);
   const [isDuplicatesModalOpen, setIsDuplicatesModalOpen] = useState(false);
-
-  // Fetch paginated license records for the browse view
-  const fetchBrowseRecords = async () => {
-    setIsBrowseLoading(true);
-    try {
-      const q = browseSearch.trim();
-      const url = `/api/search?q=${encodeURIComponent(q)}&page=${browsePage}&limit=${browseLimit}${tableMode === "available" ? "&available=true" : ""}`;
-      const data = await safeFetchJson(url);
-      if (data && data.success) {
-        setBrowseRecords(data.results);
-        setBrowseTotal(data.totalMatches);
-      }
-    } catch (e) {
-      console.error("Error fetching browse records:", e);
-    } finally {
-      setIsBrowseLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (tableMode === "records" || tableMode === "available") {
-      fetchBrowseRecords();
-    }
-  }, [tableMode, browsePage, browseLimit, browseSearch]);
 
   // Sudden Loss Recovery Dates
   const [recoveryFromDate, setRecoveryFromDate] = useState("2026-07-01");
@@ -745,8 +712,6 @@ export default function OfficeAdminPanel({
           addAuditLog(`नयाँ एक्सेल लट ${newLot.code} आयात गरियो (${recordsCount.toLocaleString()} रेकर्डस्)`);
         }
       }
-
-      setTableMode("lots");
     }
   }, [uploadStatus]);
 
@@ -1294,16 +1259,7 @@ export default function OfficeAdminPanel({
             </div>
 
             <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <label className="block text-[11px] uppercase tracking-wider text-slate-500">पासवर्ड (PASSWORD):</label>
-                <button
-                  type="button"
-                  onClick={handleResetPasswordToDefault}
-                  className="text-[10px] text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer"
-                >
-                  पासवर्ड बिर्सनुभयो? (Forgot Password?)
-                </button>
-              </div>
+              <label className="block text-[11px] uppercase tracking-wider text-slate-500">पासवर्ड (PASSWORD):</label>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
@@ -1329,20 +1285,6 @@ export default function OfficeAdminPanel({
             >
               लगइन गर्नुहोस् (Secure Login)
             </button>
-
-            <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-left flex items-center justify-between gap-2">
-              <div className="text-[11px] text-slate-600">
-                <span className="font-bold text-slate-700">पूर्वनिर्धारित लगइन (Default Login):</span>
-                <span className="block text-[10px] text-slate-500 font-mono">tmodlitahari@gmail.com / Password@2083</span>
-              </div>
-              <button
-                type="button"
-                onClick={handleResetPasswordToDefault}
-                className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold rounded transition cursor-pointer shrink-0"
-              >
-                Auto-fill
-              </button>
-            </div>
           </form>
 
           <div className="text-[10px] text-slate-400 font-medium pt-2 border-t border-slate-100 flex justify-between">
@@ -1798,20 +1740,11 @@ export default function OfficeAdminPanel({
 
               {activeSubTab === "upload" && (
                 <>
-                  {/* WORKSHEET VIEW SWITCHER TABS - 3 HIGH-FIDELITY INTERACTIVE CARDS */}
+                  {/* DASHBOARD METRIC STATISTICS - DISPLAY-ONLY CARDS */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-3 pb-5 select-none" id="dashboard-switcher-cards">
                     {/* Card 1: TOTAL RECORDS */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTableMode("records");
-                        setBrowsePage(1);
-                      }}
-                      className={`flex items-center justify-between p-4 rounded-2xl border text-left w-full transition-all duration-200 outline-none focus:outline-none focus:ring-2 focus:ring-indigo-200 cursor-pointer ${
-                        tableMode === "records"
-                          ? "border-indigo-500 bg-indigo-50/30 ring-2 ring-indigo-100/50 shadow-md transform -translate-y-0.5 font-bold"
-                          : "border-slate-200 bg-white hover:bg-slate-50/60 hover:border-slate-300 hover:shadow-xs"
-                      }`}
+                    <div
+                      className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 bg-white text-left w-full shadow-xs"
                     >
                       <div className="flex flex-col pr-2">
                         <span className="text-[10px] md:text-[11.5px] font-black text-slate-500 uppercase tracking-wide leading-none">
@@ -1820,35 +1753,19 @@ export default function OfficeAdminPanel({
                         <span className="text-2xl md:text-3xl font-black font-mono text-indigo-950 mt-2 leading-none">
                           {(totalInDb !== undefined ? totalInDb : (stats?.total || 0)).toLocaleString()}
                         </span>
-                        <span className={`text-[9.5px] font-bold flex items-center gap-1 mt-3 leading-none transition-colors ${
-                          tableMode === "records" ? "text-indigo-600" : "text-slate-400"
-                        }`}>
-                          {tableMode === "records" ? (
-                            <>
-                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
-                              <span>• तालिकामा देखाइएको छ</span>
-                            </>
-                          ) : (
-                            <span>तालिकामा हेर्न क्लिक गर्नुहोस्</span>
-                          )}
+                        <span className="text-[9.5px] font-bold text-slate-400 flex items-center gap-1 mt-3 leading-none">
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                          <span>प्रणालीमा सुरक्षित कुल अभिलेख</span>
                         </span>
                       </div>
-                      <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 transition-colors duration-200 ${
-                        tableMode === "records" ? "bg-indigo-600 text-white" : "bg-indigo-50 text-indigo-500"
-                      }`}>
+                      <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-indigo-50 text-indigo-500">
                         <Database className="w-5 h-5" />
                       </div>
-                    </button>
+                    </div>
 
                     {/* Card 2: TOTAL LOTS */}
-                    <button
-                      type="button"
-                      onClick={() => setTableMode("lots")}
-                      className={`flex items-center justify-between p-4 rounded-2xl border text-left w-full transition-all duration-200 outline-none focus:outline-none focus:ring-2 focus:ring-amber-200 cursor-pointer ${
-                        tableMode === "lots"
-                          ? "border-amber-400 bg-amber-50/20 ring-2 ring-amber-100/50 shadow-md transform -translate-y-0.5 font-bold"
-                          : "border-slate-200 bg-white hover:bg-slate-50/60 hover:border-slate-300 hover:shadow-xs"
-                      }`}
+                    <div
+                      className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 bg-white text-left w-full shadow-xs"
                     >
                       <div className="flex flex-col pr-2">
                         <span className="text-[10px] md:text-[11.5px] font-black text-slate-500 uppercase tracking-wide leading-none">
@@ -1857,38 +1774,19 @@ export default function OfficeAdminPanel({
                         <span className="text-2xl md:text-3xl font-black font-mono text-amber-950 mt-2 leading-none">
                           {uploadedLots.length}
                         </span>
-                        <span className={`text-[9.5px] font-bold flex items-center gap-1 mt-3 leading-none transition-colors ${
-                          tableMode === "lots" ? "text-amber-600" : "text-amber-700/80"
-                        }`}>
-                          {tableMode === "lots" ? (
-                            <>
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-                              <span>•  तालिकामा देखाइएको छ</span>
-                            </>
-                          ) : (
-                            <span>तालिकामा हेर्न क्लिक गर्नुहोस्</span>
-                          )}
+                        <span className="text-[9.5px] font-bold text-slate-400 flex items-center gap-1 mt-3 leading-none">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                          <span>अपलोड गरिएका लट वर्कशीट</span>
                         </span>
                       </div>
-                      <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 transition-colors duration-200 ${
-                        tableMode === "lots" ? "bg-amber-500 text-white animate-pulse" : "bg-amber-50 text-amber-600"
-                      }`}>
+                      <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-amber-50 text-amber-600">
                         <Layers className="w-5 h-5" />
                       </div>
-                    </button>
+                    </div>
 
                     {/* Card 3: AVAILABLE CARDS */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTableMode("available");
-                        setBrowsePage(1);
-                      }}
-                      className={`flex items-center justify-between p-4 rounded-2xl border text-left w-full transition-all duration-200 outline-none focus:outline-none focus:ring-2 focus:ring-emerald-200 cursor-pointer ${
-                        tableMode === "available"
-                          ? "border-emerald-500 bg-emerald-50/20 ring-2 ring-emerald-100/50 shadow-md transform -translate-y-0.5 font-bold"
-                          : "border-slate-200 bg-white hover:bg-slate-50/60 hover:border-slate-300 hover:shadow-xs"
-                      }`}
+                    <div
+                      className="flex items-center justify-between p-4 rounded-2xl border border-slate-200 bg-white text-left w-full shadow-xs"
                     >
                       <div className="flex flex-col pr-2">
                         <span className="text-[10px] md:text-[11.5px] font-black text-slate-500 uppercase tracking-wide leading-none">
@@ -1897,288 +1795,138 @@ export default function OfficeAdminPanel({
                         <span className="text-2xl md:text-3xl font-black font-mono text-emerald-950 mt-2 leading-none">
                           {(stats?.available || 0).toLocaleString()}
                         </span>
-                        <span className={`text-[9.5px] font-bold flex items-center gap-1 mt-3 leading-none transition-colors ${
-                          tableMode === "available" ? "text-emerald-600" : "text-slate-400"
-                        }`}>
-                          {tableMode === "available" ? (
-                            <>
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                              <span>•  तालिकामा देखाइएको छ</span>
-                            </>
-                          ) : (
-                            <span>तालिकामा हेर्न क्लिक गर्नुहोस्</span>
-                          )}
+                        <span className="text-[9.5px] font-bold text-slate-400 flex items-center gap-1 mt-3 leading-none">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                          <span>कार्यालयमा वितरणका लागि उपलब्ध</span>
                         </span>
                       </div>
-                      <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 transition-colors duration-200 ${
-                        tableMode === "available" ? "bg-emerald-600 text-white" : "bg-emerald-50 text-emerald-600"
-                      }`}>
+                      <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-emerald-50 text-emerald-600">
                         <CheckCircle2 className="w-5 h-5" />
                       </div>
-                    </button>
+                    </div>
                   </div>
 
-                  {/* Conditional Table Display */}
-                  {tableMode === "lots" ? (
-                    /* UPLOADED LOT HISTORY WORKSHEET */
-                    <div className="bg-white border border-slate-200 rounded-2xl p-5 md:p-6 space-y-4 shadow-sm">
-                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-100 pb-4">
-                        <div>
-                          <h3 className="text-sm md:text-base font-black text-slate-800 uppercase tracking-wide flex items-center gap-2 whitespace-nowrap">
-                            <span className="w-2.5 h-2.5 bg-orange-500 rounded-full shrink-0"></span>
-                            लट-वार अपलोड वर्कशीट तालिका (UPLOADED LOT HISTORY WORKSHEET)
-                          </h3>
-                          <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                            कार्यालयमा आयात गरिएका मुख्य लट (Lot) डेटा विवरणहरू उपलब्ध छन्। कुल रेकर्ड स्वचालित गणना सूत्रद्वारा निकालिन्छ।
-                          </p>
-                        </div>
-
-                        {/* Search box inside lot table */}
-                        <div className="flex gap-1.5 w-full sm:w-auto">
-                          <div className="relative flex-1 sm:w-64">
-                            <input
-                              type="text"
-                              placeholder="फाइल नाम वा लट खोज्नुहोस्..."
-                              value={lotSearchQuery}
-                              onChange={(e) => setLotSearchQuery(e.target.value)}
-                              className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 text-xs font-bold text-slate-700"
-                            />
-                            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setLotSearchQuery("")}
-                            className="p-1.5 text-slate-400 hover:text-slate-600 bg-slate-50 border border-slate-200 rounded"
-                          >
-                            <RefreshCw className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
+                  {/* UPLOADED LOT HISTORY WORKSHEET */}
+                  <div className="bg-white border border-slate-200 rounded-2xl p-5 md:p-6 space-y-4 shadow-sm">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-100 pb-4">
+                      <div>
+                        <h3 className="text-sm md:text-base font-black text-slate-800 uppercase tracking-wide flex items-center gap-2 whitespace-nowrap">
+                          <span className="w-2.5 h-2.5 bg-orange-500 rounded-full shrink-0"></span>
+                          लट-वार अपलोड वर्कशीट तालिका (UPLOADED LOT HISTORY WORKSHEET)
+                        </h3>
+                        <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
+                          कार्यालयमा आयात गरिएका मुख्य लट (Lot) डेटा विवरणहरू उपलब्ध छन्। कुल रेकर्ड स्वचालित गणना सूत्रद्वारा निकालिन्छ।
+                        </p>
                       </div>
 
-                      {/* Lot History Table View (Center Aligned, Black Borders, No File Type, Tight Height) */}
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-[11.5px] text-center border border-black border-collapse">
-                          <thead>
-                            <tr className="bg-slate-100 text-slate-900 font-extrabold uppercase text-[12px] tracking-wide border-b-2 border-black">
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[45px]">S.N.</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[150px]">UPLOADED FILE NAME</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[90px]">LOT CODE</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[90px]">NEPALI DATE</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[110px]">PREVIOUS RECORDS</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[110px]">RECENT RECORDS</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black text-red-600 whitespace-normal break-words leading-tight max-w-[110px]">DUPLICATE FOUND</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black text-blue-700 whitespace-normal break-words leading-tight max-w-[120px]">TOTAL RECORDS</th>
-                              <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[80px]">STATUS</th>
-                            </tr>
-                          </thead>
-                          <tbody className="font-sans text-slate-800 font-bold leading-tight">
-                            {filteredLots.length === 0 ? (
-                              <tr>
-                                <td colSpan={9} className="p-4 text-center text-slate-400 border border-black">
-                                  <div className="flex flex-col items-center justify-center space-y-1">
-                                    <FileSpreadsheet className="w-6 h-6 text-slate-300" />
-                                    <p className="font-extrabold text-[11px] text-slate-500">कुनै लट उपलब्ध छैन।</p>
-                                  </div>
-                                </td>
-                              </tr>
-                            ) : (
-                              filteredLots.map((lot, idx) => {
-                                const prevRecs = lot.prevRecords !== undefined ? lot.prevRecords : 0;
-                                const recentRecs = lot.recentRecords !== undefined ? lot.recentRecords : lot.records;
-                                const dupFound = lot.duplicateFound !== undefined ? lot.duplicateFound : 0;
-                                const totalAfter = lot.totalRecordsAfter !== undefined ? lot.totalRecordsAfter : lot.records;
+                      {/* Search box inside lot table */}
+                      <div className="flex gap-1.5 w-full sm:w-auto">
+                        <div className="relative flex-1 sm:w-64">
+                          <input
+                            type="text"
+                            placeholder="फाइल नाम वा लट खोज्नुहोस्..."
+                            value={lotSearchQuery}
+                            onChange={(e) => setLotSearchQuery(e.target.value)}
+                            className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 text-xs font-bold text-slate-700"
+                          />
+                          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setLotSearchQuery("")}
+                          className="p-1.5 text-slate-400 hover:text-slate-600 bg-slate-50 border border-slate-200 rounded"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
 
-                                return (
-                                  <tr key={idx} className="hover:bg-slate-50/50">
-                                    <td className="px-1 py-1 font-mono text-slate-500 border border-black text-center text-[11.5px]">{idx + 1}</td>
-                                    <td className="px-1 py-1 text-slate-800 max-w-[130px] truncate font-bold border border-black text-center text-[11.5px]" title={lot.fileName}>{lot.fileName}</td>
-                                    <td className="px-1 py-1 font-mono font-black text-blue-700 border border-black text-center text-[11.5px]">{getDynamicLotCode(lot.code)}</td>
-                                    <td className="px-1 py-1 text-slate-600 font-bold border border-black text-center text-[11.5px]">{lot.nepaliDate || "2083/04/01"}</td>
-                                    <td className="px-1 py-1 text-center font-mono font-bold text-slate-500 border border-black text-[11.5px]">{prevRecs.toLocaleString()}</td>
-                                    <td className="px-1 py-1 text-center font-mono font-bold text-slate-700 border border-black text-[11.5px]">{recentRecs.toLocaleString()}</td>
-                                    <td className={`px-1 py-1 text-center font-mono font-black border border-black text-[11.5px] ${dupFound > 0 ? "text-red-600" : "text-slate-400"}`}>
-                                      {dupFound > 0 ? `-${dupFound.toLocaleString()}` : "0"}
-                                    </td>
-                                    <td className="px-1 py-1 text-center font-mono font-black text-blue-800 bg-blue-50/20 border border-black" title={`${prevRecs} + ${recentRecs} - ${dupFound} = ${totalAfter}`}>
-                                      <div className="flex flex-col items-center leading-none">
-                                        <span className="text-[11.5px]">{totalAfter.toLocaleString()}</span>
-                                        <span className="text-[8.5px] text-slate-400 font-bold tracking-tighter block mt-0.5">{prevRecs} + {recentRecs} - {dupFound}</span>
-                                      </div>
-                                    </td>
-                                    <td className="px-1 py-1 text-center border border-black">
-                                      <div className="flex items-center justify-center gap-1 flex-wrap leading-none">
-                                        <span className="inline-flex items-center gap-0.5 text-[9.5px] font-black px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                          Successfully Processed / {recentRecs - dupFound}
-                                        </span>
-                                        {dupFound > 0 && (
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setSelectedLotDuplicates(lot.duplicatesList || []);
-                                              setIsDuplicatesModalOpen(true);
-                                              addAuditLog(`${lot.code} को प्रतिलिपि तुलना विश्लेषण खोलियो`);
-                                            }}
-                                            className="px-1.5 py-0.5 rounded text-[9.5px] font-black bg-red-600 hover:bg-red-700 text-white shadow-3xs border border-red-500 transition-all uppercase leading-none"
-                                          >
-                                            COMPARE DUPLICATES
-                                          </button>
-                                        )}
+                    {/* Lot History Table View (Center Aligned, Black Borders, No File Type, Tight Height) */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11.5px] text-center border border-black border-collapse">
+                        <thead>
+                          <tr className="bg-slate-100 text-slate-900 font-extrabold uppercase text-[12px] tracking-wide border-b-2 border-black">
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[45px]">S.N.</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[150px]">UPLOADED FILE NAME</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[90px]">LOT CODE</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[90px]">NEPALI DATE</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[110px]">PREVIOUS RECORDS</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[110px]">RECENT RECORDS</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black text-red-600 whitespace-normal break-words leading-tight max-w-[110px]">DUPLICATE FOUND</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black text-blue-700 whitespace-normal break-words leading-tight max-w-[120px]">TOTAL RECORDS</th>
+                            <th className="px-2 py-2 border border-black text-center select-none font-black whitespace-normal break-words leading-tight max-w-[80px]">STATUS</th>
+                          </tr>
+                        </thead>
+                        <tbody className="font-sans text-slate-800 font-bold leading-tight">
+                          {filteredLots.length === 0 ? (
+                            <tr>
+                              <td colSpan={9} className="p-4 text-center text-slate-400 border border-black">
+                                <div className="flex flex-col items-center justify-center space-y-1">
+                                  <FileSpreadsheet className="w-6 h-6 text-slate-300" />
+                                  <p className="font-extrabold text-[11px] text-slate-500">कुनै लट उपलब्ध छैन।</p>
+                                </div>
+                              </td>
+                            </tr>
+                          ) : (
+                            filteredLots.map((lot, idx) => {
+                              const prevRecs = lot.prevRecords !== undefined ? lot.prevRecords : 0;
+                              const recentRecs = lot.recentRecords !== undefined ? lot.recentRecords : lot.records;
+                              const dupFound = lot.duplicateFound !== undefined ? lot.duplicateFound : 0;
+                              const totalAfter = lot.totalRecordsAfter !== undefined ? lot.totalRecordsAfter : lot.records;
+
+                              return (
+                                <tr key={idx} className="hover:bg-slate-50/50">
+                                  <td className="px-1 py-1 font-mono text-slate-500 border border-black text-center text-[11.5px]">{idx + 1}</td>
+                                  <td className="px-1 py-1 text-slate-800 max-w-[130px] truncate font-bold border border-black text-center text-[11.5px]" title={lot.fileName}>{lot.fileName}</td>
+                                  <td className="px-1 py-1 font-mono font-black text-blue-700 border border-black text-center text-[11.5px]">{getDynamicLotCode(lot.code)}</td>
+                                  <td className="px-1 py-1 text-slate-600 font-bold border border-black text-center text-[11.5px]">{lot.nepaliDate || "2083/04/01"}</td>
+                                  <td className="px-1 py-1 text-center font-mono font-bold text-slate-500 border border-black text-[11.5px]">{prevRecs.toLocaleString()}</td>
+                                  <td className="px-1 py-1 text-center font-mono font-bold text-slate-700 border border-black text-[11.5px]">{recentRecs.toLocaleString()}</td>
+                                  <td className={`px-1 py-1 text-center font-mono font-black border border-black text-[11.5px] ${dupFound > 0 ? "text-red-600" : "text-slate-400"}`}>
+                                    {dupFound > 0 ? `-${dupFound.toLocaleString()}` : "0"}
+                                  </td>
+                                  <td className="px-1 py-1 text-center font-mono font-black text-blue-800 bg-blue-50/20 border border-black" title={`${prevRecs} + ${recentRecs} - ${dupFound} = ${totalAfter}`}>
+                                    <div className="flex flex-col items-center leading-none">
+                                      <span className="text-[11.5px]">{totalAfter.toLocaleString()}</span>
+                                      <span className="text-[8.5px] text-slate-400 font-bold tracking-tighter block mt-0.5">{prevRecs} + {recentRecs} - {dupFound}</span>
+                                    </div>
+                                  </td>
+                                  <td className="px-1 py-1 text-center border border-black">
+                                    <div className="flex items-center justify-center gap-1 flex-wrap leading-none">
+                                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-black px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
+                                        Successfully Processed / {recentRecs - dupFound}
+                                      </span>
+                                      {dupFound > 0 && (
                                         <button
                                           type="button"
-                                          onClick={() => deleteLotItem(lot.code, lot.records)}
-                                          className="p-0.5 text-slate-400 hover:text-red-600 rounded hover:bg-slate-100 transition-all"
-                                          title="Delete Lot"
+                                          onClick={() => {
+                                            setSelectedLotDuplicates(lot.duplicatesList || []);
+                                            setIsDuplicatesModalOpen(true);
+                                            addAuditLog(`${lot.code} को प्रतिलिपि तुलना विश्लेषण खोलियो`);
+                                          }}
+                                          className="px-1.5 py-0.5 rounded text-[9.5px] font-black bg-red-600 hover:bg-red-700 text-white shadow-3xs border border-red-500 transition-all uppercase leading-none"
                                         >
-                                          <Trash2 className="w-3 h-3" />
+                                          COMPARE DUPLICATES
                                         </button>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                );
-                              })
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : (
-                    /* RECORDS Worksheet (Total and Available Cards browse view) */
-                    <div className="bg-white border border-slate-200 rounded-2xl p-5 md:p-6 space-y-4 shadow-sm">
-                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-100 pb-4">
-                        <div>
-                          <h3 className="text-sm md:text-base font-black text-slate-800 uppercase tracking-wide flex items-center gap-2">
-                            <span className={`w-2.5 h-2.5 rounded-full ${tableMode === "records" ? "bg-blue-500" : "bg-emerald-500"}`}></span>
-                            {tableMode === "records" 
-                              ? "कुल सुरक्षित अनुमतिपत्र अभिलेख विवरण (SAVED LICENSE RECORDS WORKSHEET)"
-                              : "उपलब्ध अनुमतिपत्र कार्ड विवरण (AVAILABLE CARDS WORKSHEET)"}
-                          </h3>
-                          <p className="text-[10px] text-slate-400 font-semibold mt-0.5">
-                            {tableMode === "records"
-                              ? "डाटाबेसमा सुरक्षित गरिएका सबै सवारी चालक अनुमतिपत्रका अभिलेख विवरणहरू यहाँ उपलब्ध छन्।"
-                              : "कार्यालयमा उपलब्ध रहेका र सेवाग्राहीलाई बुझाउन बाँकी रहेका लाइसेन्स विवरणहरू यहाँ उपलब्ध छन्।"}
-                          </p>
-                        </div>
-
-                        {/* Search box inside records table */}
-                        <div className="flex gap-1.5 w-full sm:w-auto">
-                          <div className="relative flex-1 sm:w-64">
-                            <input
-                              type="text"
-                              placeholder="नाम, लाइसेन्स वा आवेदक नम्बर..."
-                              value={browseSearch}
-                              onChange={(e) => {
-                                setBrowseSearch(e.target.value);
-                                setBrowsePage(1);
-                              }}
-                              className="w-full pl-8 pr-3 py-1.5 border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 text-xs font-bold text-slate-700"
-                            />
-                            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                          </div>
-                          <button
-                            onClick={() => {
-                              setBrowseSearch("");
-                              setBrowsePage(1);
-                            }}
-                            className="p-1.5 text-slate-400 hover:text-slate-600 bg-slate-50 border border-slate-200 rounded"
-                          >
-                            <RefreshCw className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Browse Saved Records Table */}
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-[11px] text-left border-collapse">
-                          <thead>
-                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-black uppercase text-[10px] tracking-wider">
-                              <th className="p-2.5">S.N.</th>
-                              <th className="p-2.5">APPLICANT ID</th>
-                              <th className="p-2.5">FULL NAME</th>
-                              <th className="p-2.5">LICENSE NO.</th>
-                              <th className="p-2.5">CATEGORY</th>
-                              <th className="p-2.5">OLD CODE</th>
-                              <th className="p-2.5">NEW CODE</th>
-                              <th className="p-2.5">VISIT DATE</th>
-                              <th className="p-2.5">STATUS</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100 font-sans text-slate-700 font-semibold">
-                            {isBrowseLoading ? (
-                              <tr>
-                                <td colSpan={9} className="p-12 text-center text-slate-400">
-                                  <div className="flex flex-col items-center justify-center space-y-2">
-                                    <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                                    <p className="text-xs font-bold text-slate-500">अभिलेख लोड हुँदैछ...</p>
-                                  </div>
-                                </td>
-                              </tr>
-                            ) : browseRecords.length === 0 ? (
-                              <tr>
-                                <td colSpan={9} className="p-8 text-center text-slate-400">
-                                  <div className="flex flex-col items-center justify-center space-y-2">
-                                    <Database className="w-8 h-8 text-slate-300" />
-                                    <p className="font-extrabold text-xs text-slate-500">कुनै रेकर्ड फेला परेन।</p>
-                                  </div>
-                                </td>
-                              </tr>
-                            ) : (
-                              browseRecords.map((rec, idx) => (
-                                <tr key={idx} className="hover:bg-slate-50/50">
-                                  <td className="p-2.5 font-mono text-slate-400">{rec.serialNo || rec.sn || ((browsePage - 1) * browseLimit + idx + 1)}</td>
-                                  <td className="p-2.5 font-mono font-black text-slate-800">{rec.applicantId}</td>
-                                  <td className="p-2.5 text-slate-900 font-bold">{rec.fullName}</td>
-                                  <td className="p-2.5 font-mono font-black text-blue-700">{rec.licenseNo}</td>
-                                  <td className="p-2.5 font-black text-slate-600"><span className="bg-slate-100 px-1.5 py-0.5 rounded">{rec.category}</span></td>
-                                  <td className="p-2.5 font-mono text-slate-500">{rec.oldCode || "-"}</td>
-                                  <td className="p-2.5 font-mono text-slate-800 font-bold">{rec.newCode || "-"}</td>
-                                  <td className="p-2.5 text-slate-600">{rec.visitDate || "-"}</td>
-                                  <td className="p-2.5">
-                                    {rec.receivedBy && rec.receivedBy.trim() !== "" ? (
-                                      <span className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
-                                        Received: {rec.receivedBy}
-                                      </span>
-                                    ) : (
-                                      <span className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                        Available in Office
-                                      </span>
-                                    )}
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => deleteLotItem(lot.code, lot.records)}
+                                        className="p-0.5 text-slate-400 hover:text-red-600 rounded hover:bg-slate-100 transition-all"
+                                        title="Delete Lot"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      {/* Browse Pagination */}
-                      {!isBrowseLoading && browseTotal > 0 && (
-                        <div className="flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 pt-4 border-t border-slate-100 gap-3">
-                          <div>
-                            देखाउँदै <b>{((browsePage - 1) * browseLimit) + 1}</b> देखि <b>{Math.min(browsePage * browseLimit, browseTotal)}</b> सम्म (कुल <b>{browseTotal.toLocaleString()}</b> रेकर्डहरू)
-                          </div>
-                          <div className="flex gap-1">
-                            <button
-                              disabled={browsePage === 1}
-                              onClick={() => setBrowsePage(p => Math.max(1, p - 1))}
-                              className="px-2.5 py-1.5 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 text-[10px] font-black uppercase transition-all"
-                            >
-                              Prev
-                            </button>
-                            <span className="px-3.5 py-1.5 bg-slate-100 border border-slate-200 rounded font-bold text-slate-700 font-mono">
-                              {browsePage}
-                            </span>
-                            <button
-                              disabled={browsePage * browseLimit >= browseTotal}
-                              onClick={() => setBrowsePage(p => p + 1)}
-                              className="px-2.5 py-1.5 border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 text-[10px] font-black uppercase transition-all"
-                            >
-                              Next
-                            </button>
-                          </div>
-                        </div>
-                      )}
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
                     </div>
-                  )}
+                  </div>
 
                   {/* Upload Lot Box (IMPORT NEW DATA LOT) */}
                   <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-6 md:p-8 text-center shadow-sm">
