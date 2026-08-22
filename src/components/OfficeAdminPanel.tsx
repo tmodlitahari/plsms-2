@@ -29,15 +29,18 @@ import {
 async function safeFetchJson<T = any>(url: string, options?: RequestInit): Promise<T | null> {
   try {
     const res = await fetch(url, options);
-    const contentType = res.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      const text = await res.text();
-      console.warn(`[API] Server returned non-JSON response (${res.status}) for ${url}:`, text.slice(0, 100));
+    const text = await res.text();
+    if (!text || text.trim() === "") {
       return null;
     }
-    return await res.json();
+    try {
+      return JSON.parse(text);
+    } catch (parseErr) {
+      console.warn(`[API] JSON parse error (${res.status}) for ${url}:`, text.slice(0, 150));
+      return null;
+    }
   } catch (err) {
-    console.error(`[API] Error fetching ${url}:`, err);
+    console.error(`[API] Network error fetching ${url}:`, err);
     return null;
   }
 }
@@ -780,9 +783,8 @@ export default function OfficeAdminPanel({
     setIsResettingDb(true);
     try {
       addAuditLog("डाटाबेस पूर्ण रिसेट र नयाँ लोड प्रक्रिया सुरु गरियो (सुपर एड्मिनद्वारा प्रमाणित)", "चेतावनी (Warning)");
-      const res = await fetch("/api/license/reset", { method: "POST" });
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetchJson<{ success: boolean; error?: string }>("/api/license/reset", { method: "POST" });
+      if (data && data.success) {
         setUploadedLots([]);
         localStorage.removeItem("nepal_dmv_uploaded_lots");
         addAuditLog("डाटाबेसका सबै स्थानीय रेकर्ड र इतिहास सफा गरियो। नयाँ लट लोड गर्न तयार।", "असुरक्षित (Alert)");
@@ -812,6 +814,12 @@ export default function OfficeAdminPanel({
           "डाटाबेस सफलतापूर्वक रिसेट गरियो! अब नयाँ एक्सेल वा सीएसभी फाइल लोड गर्न कृपया हरियो '[ नयाँ लट थप्नुहोस् ]' बटन थिच्नुहोस् वा फाइल ड्र्याग गर्नुहोस्।",
           "success"
         );
+      } else {
+        showCustomAlert(
+          "❌ रिसेट असफल",
+          "डेटाबेस रिसेट असफल भयो: " + (data?.error || "सर्भरबाट प्रतिक्रिया प्राप्त भएन"),
+          "error"
+        );
       }
     } catch (e: any) {
       showCustomAlert(
@@ -831,9 +839,8 @@ export default function OfficeAdminPanel({
     addAuditLog(`फायरबेस सेन्ट्रल डाटाबेसबाट डाटा रिकभरी सुरु`, "चेतावनी (Warning)");
 
     try {
-      const response = await fetch(`/api/license/recover`, { method: "POST" });
-      const data = await response.json();
-      if (data.success) {
+      const data = await safeFetchJson<{ success: boolean; count?: number; error?: string }>(`/api/license/recover`, { method: "POST" });
+      if (data && data.success) {
         setIsRecovering(false);
         setRecoveryMessage(`डाटाबेस सफलतापूर्वक रिकभर भयो! फायरबेस सेन्ट्रल डाटाबेसबाट ${(data.count || 0).toLocaleString()} लाइसेन्स रेकर्डहरू पुनः प्राप्त गरियो।`);
         addAuditLog(`डाटा रिकभरी सफलतापूर्वक सम्पन्न भयो (${(data.count || 0).toLocaleString()} रेकर्डस् पुनः प्राप्त)`, "सफल (Success)");
@@ -842,7 +849,7 @@ export default function OfficeAdminPanel({
         }, 1500);
       } else {
         setIsRecovering(false);
-        setRecoveryMessage("त्रुटि: " + (data.error || "रिकभरी असफल भयो।"));
+        setRecoveryMessage("त्रुटि: " + (data?.error || "रिकभरी असफल भयो।"));
       }
     } catch (err: any) {
       setIsRecovering(false);
@@ -871,15 +878,14 @@ export default function OfficeAdminPanel({
       `के तपाईं निश्चित हुनुहुन्छ कि तपाईं ${lotCode} लाई डिलिट गर्न चाहनुहुन्छ? यस सम्बद्ध ${count.toLocaleString()} रेकर्डहरू डाटाबेस र इतिहासबाट स्थायी रूपमा हट्नेछन् र ड्यासबोर्ड तथ्याङ्क स्वतः घट्नेछ।`,
       async () => {
         try {
-          const res = await fetch("/api/license/delete-lot", {
+          const data = await safeFetchJson<{ success: boolean; error?: string }>("/api/license/delete-lot", {
             method: "POST",
             headers: {
               "Content-Type": "application/json"
             },
             body: JSON.stringify({ lotCode, count })
           });
-          const data = await res.json();
-          if (data.success) {
+          if (data && data.success) {
             const nextLots = uploadedLots.filter(lot => lot.code !== lotCode);
             localStorage.setItem("nepal_dmv_uploaded_lots", JSON.stringify(nextLots));
             setUploadedLots(nextLots);
@@ -887,10 +893,10 @@ export default function OfficeAdminPanel({
             // Reload to update stats and cache reactively
             window.location.reload();
           } else {
-            showCustomAlert("❌ डिलिट असफल", "डिलिट असफल भयो: " + (data.error || "Unknown error"), "error");
+            showCustomAlert("❌ डिलिट असफल", "डिलिट असफल भयो: " + (data?.error || "Unknown error"), "error");
           }
         } catch (e: any) {
-          showCustomAlert("❌ त्रुटि", "त्रुटि: " + e.message, "error");
+          showCustomAlert("❌ डिलिट असफल", "डिलिट असफल भयो: " + e.message, "error");
         }
       }
     );
@@ -1136,7 +1142,7 @@ export default function OfficeAdminPanel({
     setHandoverStatusMsg(null);
 
     try {
-      const res = await fetch("/api/license/receive", {
+      const data = await safeFetchJson<{ success: boolean; error?: string }>("/api/license/receive", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1148,8 +1154,7 @@ export default function OfficeAdminPanel({
         })
       });
 
-      const data = await res.json();
-      if (data.success) {
+      if (data && data.success) {
         setHandoverStatusMsg({
           success: true,
           message: currentReceiver.trim() 

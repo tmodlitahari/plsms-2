@@ -525,11 +525,23 @@ export default function App() {
         body: file,
       });
 
-      const initialData = await initialRes.json();
-      if (!initialData.success) {
+      const initialRawText = await initialRes.text();
+      let initialData: any = null;
+      try {
+        initialData = initialRawText ? JSON.parse(initialRawText) : null;
+      } catch (jsonErr) {
+        console.error("[Upload] Failed to parse initial JSON response:", initialRawText.slice(0, 300));
         setUploadStatus({
           success: false,
-          message: initialData.error || "An error occurred during file upload.",
+          message: `सर्भरबाट प्रतिक्रिया प्राप्त भएन (${initialRes.status}): ${initialRawText.slice(0, 150) || "Empty response"}`,
+        });
+        return;
+      }
+
+      if (!initialRes.ok || !initialData || !initialData.success) {
+        setUploadStatus({
+          success: false,
+          message: initialData?.error || initialData?.message || `फाइल अपलोड असफल भयो (${initialRes.status})`,
         });
         return;
       }
@@ -537,19 +549,40 @@ export default function App() {
       let data = initialData;
       if (initialData.status === "processing" && initialData.jobId) {
         const jobId = initialData.jobId;
-        while (true) {
+        let attempts = 0;
+        const maxAttempts = 600; // 10 minutes maximum polling
+        while (attempts < maxAttempts) {
+          attempts++;
           await new Promise(r => setTimeout(r, 1000));
-          const statusRes = await fetch(`/api/import/status?jobId=${jobId}`);
-          const statusData = await statusRes.json();
-          if (statusData.status === "completed") {
-            data = statusData.result || {};
-            break;
-          } else if (statusData.status === "failed") {
-            setUploadStatus({
-              success: false,
-              message: statusData.error || "Import job failed.",
-            });
-            return;
+          try {
+            const statusRes = await fetch(`/api/import/status?jobId=${jobId}`);
+            const statusRawText = await statusRes.text();
+            if (!statusRes.ok) {
+              console.warn(`[Import Status] Poll status HTTP ${statusRes.status}, retrying...`);
+              continue;
+            }
+            if (!statusRawText || statusRawText.trim() === "") {
+              continue;
+            }
+            let statusData: any = null;
+            try {
+              statusData = JSON.parse(statusRawText);
+            } catch (err) {
+              console.warn("[Import Status] Transient JSON parse error, retrying...", statusRawText.slice(0, 100));
+              continue;
+            }
+            if (statusData?.status === "completed") {
+              data = statusData.result || {};
+              break;
+            } else if (statusData?.status === "failed") {
+              setUploadStatus({
+                success: false,
+                message: statusData.error || "आयात कार्य असफल भयो (Import job failed).",
+              });
+              return;
+            }
+          } catch (pollErr: any) {
+            console.warn("[Import Status] Network warning during status polling:", pollErr);
           }
         }
       }
@@ -583,13 +616,13 @@ export default function App() {
       } else {
         setUploadStatus({
           success: false,
-          message: data?.error || "An error occurred while parsing the spreadsheet file.",
+          message: data?.error || data?.message || "स्प्रेडसिट फाइल पार्स गर्दा त्रुटि देखापर्यो।",
         });
       }
     } catch (e: any) {
       setUploadStatus({
         success: false,
-        message: e.message || "An error occurred during file upload.",
+        message: e?.message ? `अपलोड त्रुटि: ${e.message}` : "फाइल अपलोड गर्दा अप्रत्याशित त्रुटि देखापर्यो।",
       });
     } finally {
       setIsUploading(false);

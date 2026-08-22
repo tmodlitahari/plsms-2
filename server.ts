@@ -150,13 +150,34 @@ function saveJsonDatabaseSafe(records: LicenseRecord[]) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     const tmpPath = `${JSON_DB_PATH}.tmp.${process.pid}.${Date.now()}`;
-    const jsonStr = JSON.stringify(records, (key, value) => {
-      if (key === "_nA" || key === "_nL" || key === "_nN") return undefined;
-      return value;
-    });
-
     const fd = fs.openSync(tmpPath, "w");
-    fs.writeSync(fd, jsonStr, 0, "utf-8");
+    fs.writeSync(fd, "[\n", undefined, "utf-8");
+
+    const CHUNK = 2000;
+    const total = records.length;
+    for (let i = 0; i < total; i += CHUNK) {
+      const end = Math.min(i + CHUNK, total);
+      let chunkStr = "";
+      for (let j = i; j < end; j++) {
+        const r = records[j];
+        const cleanRec = {
+          sn: r.sn || "",
+          serialNo: r.serialNo || r.sn || "",
+          applicantId: r.applicantId || "",
+          fullName: r.fullName || "",
+          licenseNo: r.licenseNo || "",
+          category: r.category || "",
+          oldCode: r.oldCode || "",
+          newCode: r.newCode || "",
+          visitDate: r.visitDate || "",
+          receivedBy: r.receivedBy || "",
+          lotCode: r.lotCode || ""
+        };
+        chunkStr += JSON.stringify(cleanRec) + (j < total - 1 ? ",\n" : "\n");
+      }
+      fs.writeSync(fd, chunkStr, undefined, "utf-8");
+    }
+    fs.writeSync(fd, "]", undefined, "utf-8");
     fs.fsyncSync(fd);
     fs.closeSync(fd);
 
@@ -736,7 +757,7 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
   let uploadedChunksCount = 0;
 
   try {
-    const CONCURRENCY = 10;
+    const CONCURRENCY = 4;
     const chunkIndexesToUpload: number[] = [];
     for (let c = 0; c < numNewChunks; c++) {
       chunkIndexesToUpload.push(c);
@@ -748,17 +769,36 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
         await Promise.all(batch.map(async (cIndex) => {
           const chunkRecords = records.slice(cIndex * CHUNK_SIZE, (cIndex + 1) * CHUNK_SIZE);
           const targetChunkId = startChunkIndex + cIndex;
-          console.log(`[Import] Writing chunk_${targetChunkId}`);
-          await chunksCollection.doc(`chunk_${targetChunkId}`).set({
-            chunkIndex: targetChunkId,
-            records: chunkRecords,
-            updatedAt: Date.now()
-          });
+          
+          let attempts = 0;
+          let success = false;
+          let lastErr: any = null;
+          while (attempts < 3 && !success) {
+            attempts++;
+            try {
+              console.log(`[Import] Writing chunk_${targetChunkId} (attempt ${attempts})`);
+              await chunksCollection.doc(`chunk_${targetChunkId}`).set({
+                chunkIndex: targetChunkId,
+                records: chunkRecords,
+                updatedAt: Date.now()
+              });
+              success = true;
+            } catch (err: any) {
+              lastErr = err;
+              console.warn(`[Firebase] Retry ${attempts}/3 writing chunk_${targetChunkId}:`, err.message || err);
+              await new Promise(r => setTimeout(r, 800 * attempts));
+            }
+          }
+          if (!success) {
+            throw lastErr || new Error(`Failed to write chunk_${targetChunkId} after 3 attempts`);
+          }
         }));
         uploadedChunksCount += batch.length;
         activeSyncStatus.processedRecords = Math.min(records.length, uploadedChunksCount * CHUNK_SIZE);
+        // Small throttle between batches to prevent socket congestion
+        await new Promise(r => setTimeout(r, 100));
       } catch (batchErr: any) {
-        const failedChunkIndex = startChunkIndex + batch[0];
+        const failedChunkIndex = startChunkIndex + (batch[0] || 0);
         const remaining = numNewChunks - uploadedChunksCount;
         console.error(`[Firebase] Chunk upload failed at chunk_${failedChunkIndex}:`, batchErr);
         activeSyncStatus.error = batchErr.message || String(batchErr);
@@ -1248,8 +1288,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// Increase JSON payload limit to handle large search responses if needed
-app.use(express.json({ limit: "10mb" }));
+// Increase JSON and URL-encoded payload limits to handle large batches and continuous lot imports
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+// Global API Middleware: Force Content-Type: application/json on all /api endpoints
+app.use("/api", (req, res, next) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  next();
+});
 
 // Global Readiness Middleware to block data requests until startup hydration completes
 app.use(["/api/stats", "/api/search", "/api/uploaded-lots", "/api/license", "/api/export", "/api/import"], (req, res, next) => {
@@ -1769,6 +1816,10 @@ async function executeImportJob(
 }
 
 app.post("/api/import", express.raw({ type: "*/*", limit: "100mb" }), async (req, res) => {
+  req.setTimeout(600000); // 10 minutes timeout for large datasets
+  res.setTimeout(600000);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+
   try {
     const filename = (req.query.filename as string) || "imported_spreadsheet.xlsx";
     const method = (req.query.method as string) || "append";
@@ -1819,32 +1870,37 @@ app.post("/api/import", express.raw({ type: "*/*", limit: "100mb" }), async (req
 });
 
 app.get("/api/import/status", (req, res) => {
-  const jobId = req.query.jobId as string;
-  if (!jobId || !importJobs.has(jobId)) {
-    return res.status(404).json({ success: false, error: "Import job not found or expired." });
-  }
-  const job = importJobs.get(jobId)!;
-  if (job.status === "completed") {
-    return res.json({
-      success: true,
-      status: "completed",
-      progress: 100,
-      message: job.message,
-      result: job.result
-    });
-  } else if (job.status === "failed") {
-    return res.json({
-      success: false,
-      status: "failed",
-      error: job.error || "Import failed"
-    });
-  } else {
-    return res.json({
-      success: true,
-      status: "processing",
-      progress: job.progress,
-      message: job.message
-    });
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  try {
+    const jobId = req.query.jobId as string;
+    if (!jobId || !importJobs.has(jobId)) {
+      return res.status(404).json({ success: false, error: "Import job not found or expired." });
+    }
+    const job = importJobs.get(jobId)!;
+    if (job.status === "completed") {
+      return res.json({
+        success: true,
+        status: "completed",
+        progress: 100,
+        message: job.message,
+        result: job.result
+      });
+    } else if (job.status === "failed") {
+      return res.json({
+        success: false,
+        status: "failed",
+        error: job.error || "Import failed"
+      });
+    } else {
+      return res.json({
+        success: true,
+        status: "processing",
+        progress: job.progress,
+        message: job.message
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || String(err) });
   }
 });
 
