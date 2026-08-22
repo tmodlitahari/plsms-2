@@ -15,10 +15,11 @@ import {
   getDocs as webGetDocs, 
   query as webQuery, 
   limit as webLimit, 
-  startAfter as webStartAfter 
+  startAfter as webStartAfter,
+  writeBatch as webWriteBatch
 } from "firebase/firestore";
 
-// Define the interface matching the license schema in the image
+// Define the interface matching the license schema
 interface LicenseRecord {
   sn: string;
   serialNo?: string;
@@ -44,7 +45,7 @@ const CSV_DB_PATH = path.join(DATA_DIR, "license_db.csv");
 const RESET_FLAG_PATH = path.join(DATA_DIR, ".database_reset_flag");
 const UPLOADED_LOTS_PATH = path.join(DATA_DIR, "uploaded_lots.json");
 
-// In-memory database for lightning fast searching
+// In-memory database for lightning fast searching and quota optimization
 let licensesCache: LicenseRecord[] = [];
 let uploadedLotsCache: any[] = [];
 let cachedStats: { total: number; available: number; handedOver: number; categories: Record<string, number> } | null = null;
@@ -54,16 +55,32 @@ let databaseReady = false;
 let cacheReady = false;
 let startupComplete = false;
 let startupError: string | null = null;
-let isImportingLock = false;
 
-// Helper to check if an error is a Firestore quota limit error
+// Helper to check if an error is a Firestore quota limit error (code 8 / RESOURCE_EXHAUSTED / quota exceeded)
 function isQuotaExceededError(err: any): boolean {
   if (!err) return false;
-  const msg = ((err && err.message) || String(err) || "").toLowerCase();
-  return msg.includes("quota limit exceeded") || msg.includes("quota exceeded") || msg.includes("resource_exhausted") || msg.includes("free daily read units");
+  if (err.code === 8 || err.code === "resource-exhausted" || err.code === "RESOURCE_EXHAUSTED" || err.code === 429) {
+    return true;
+  }
+  const msg = (
+    (err && err.message) || 
+    (err && err.details) || 
+    String(err) || 
+    ""
+  ).toLowerCase();
+  return (
+    msg.includes("quota limit exceeded") || 
+    msg.includes("quota exceeded") || 
+    msg.includes("resource_exhausted") || 
+    msg.includes("resource-exhausted") || 
+    msg.includes("free daily read units") ||
+    msg.includes("daily read quota") ||
+    msg.includes("read quota") ||
+    msg.includes("exhausted")
+  );
 }
 
-// Helper to normalize strings for robust searching (strips hyphens, spaces, lowercases once)
+// Helper to normalize strings for robust searching & duplicate detection (strips hyphens, spaces, lowercases once)
 function normalizeSearchStr(str: string): string {
   return (str || "").toLowerCase().trim().replace(/[-\s]/g, "");
 }
@@ -144,10 +161,11 @@ function recalculateStats() {
   };
 }
 
+// Optional ephemeral local disk caching (purely best-effort, never crashes if filesystem is read-only or ephemeral)
 function saveJsonDatabaseSafe(records: LicenseRecord[]) {
   try {
     if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+      try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
     }
     const tmpPath = `${JSON_DB_PATH}.tmp.${process.pid}.${Date.now()}`;
     const fd = fs.openSync(tmpPath, "w");
@@ -183,17 +201,13 @@ function saveJsonDatabaseSafe(records: LicenseRecord[]) {
 
     fs.renameSync(tmpPath, JSON_DB_PATH);
 
-    // Keep a reliable .bak file as an extra safety layer
     try {
       const bakPath = `${JSON_DB_PATH}.bak`;
       fs.copyFileSync(JSON_DB_PATH, bakPath);
     } catch (e) {}
-
-    if (global.gc) {
-      try { (global as any).gc(); } catch (e) {}
-    }
   } catch (err) {
-    console.error("Error saving JSON database safely:", err);
+    // Non-fatal on ephemeral / stateless server environments (e.g. Render)
+    console.warn("[Storage] Notice: Local disk caching skipped or non-fatal error:", (err as any)?.message || err);
   }
 }
 
@@ -211,7 +225,7 @@ function loadUploadedLotsIntoCache() {
       if (startupComplete && licensesCache.length === 0 && uploadedLotsCache.length > 0) {
         console.log("[Database] Database cache is verified empty (0 records). Clearing ghost uploaded lots.");
         uploadedLotsCache = [];
-        fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8");
+        try { fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8"); } catch (e) {}
       }
       console.log(`[Database] Loaded ${uploadedLotsCache.length} uploaded lots from disk.`);
     } else {
@@ -234,18 +248,13 @@ function loadUploadedLotsIntoCache() {
         records: count,
         status: "Active"
       }));
-      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+      try { fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8"); } catch (e) {}
       console.log(`[Database] Synthesized ${uploadedLotsCache.length} uploaded lot entries from active licenses.`);
     }
   } catch (error) {
-    console.error("Error loading uploaded lots into cache:", error);
+    console.warn("Error loading uploaded lots into cache:", error);
     uploadedLotsCache = [];
   }
-}
-
-// Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 // Global state for live background sync progress
@@ -267,11 +276,28 @@ let activeDatabaseId = "";
 
 function createWebFirestoreAdapter(rawWebDb: any) {
   return {
+    batch() {
+      const wb = webWriteBatch(rawWebDb);
+      return {
+        set(docRefWrapper: any, data: any, options?: any) {
+          wb.set(docRefWrapper.ref || docRefWrapper, data, options);
+          return this;
+        },
+        delete(docRefWrapper: any) {
+          wb.delete(docRefWrapper.ref || docRefWrapper);
+          return this;
+        },
+        async commit() {
+          await wb.commit();
+        }
+      };
+    },
     collection(colName: string) {
       return {
         doc(docId: string) {
           const docRef = webDoc(rawWebDb, colName, docId);
           return {
+            ref: docRef,
             async get() {
               const snap = await webGetDoc(docRef);
               return {
@@ -473,10 +499,10 @@ async function initFirebase(): Promise<boolean> {
           await adminDb.collection("dataset_chunks").doc("manifest").get();
         } catch (mErr: any) {
           if (isQuotaExceededError(mErr)) {
-            console.warn("[Firebase] Admin SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+            console.warn("[Firebase] Admin SDK connected, but daily read quota is exceeded. Read operations will fallback to in-memory/cache fallback.");
             firebaseApp = adminApp;
             firestoreDb = adminDb;
-            firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+            firebaseConfigError = "Firestore daily read quota exceeded. Operating on in-memory cache fallback.";
             return true;
           }
           throw mErr;
@@ -494,68 +520,68 @@ async function initFirebase(): Promise<boolean> {
         return true;
       } catch (adminErr: any) {
         if (adminApp && adminDb && isQuotaExceededError(adminErr)) {
-          console.warn("[Firebase] Admin SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+          console.warn("[Firebase] Admin SDK connected, but daily read quota is exceeded. Read operations will fallback to in-memory cache fallback.");
           firebaseApp = adminApp;
           firestoreDb = adminDb;
-          firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+          firebaseConfigError = "Firestore daily read quota exceeded. Operating on in-memory cache fallback.";
           return true;
         }
         console.warn("[Firebase] Admin SDK init failed, trying Web SDK fallback:", adminErr.message || adminErr);
       }
     }
 
-      // 2. Fallback to Firebase Web Client SDK with apiKey (from firebase-applet-config.json)
-      if (apiKey) {
-        let webApp: any = null;
-        let adapterDb: any = null;
+    // 2. Fallback to Firebase Web Client SDK with apiKey (from firebase-applet-config.json)
+    if (apiKey) {
+      let webApp: any = null;
+      let adapterDb: any = null;
+      try {
+        webApp = initWebClientApp({
+          projectId,
+          apiKey,
+          authDomain,
+          appId,
+        }, "nepal-license-central-db-web");
+
+        const rawWebDb = getWebClientFirestore(webApp, databaseId || undefined);
+        adapterDb = createWebFirestoreAdapter(rawWebDb);
         try {
-          webApp = initWebClientApp({
-            projectId,
-            apiKey,
-            authDomain,
-            appId,
-          }, "nepal-license-central-db-web");
-
-          const rawWebDb = getWebClientFirestore(webApp, databaseId || undefined);
-          adapterDb = createWebFirestoreAdapter(rawWebDb);
-          try {
-            await adapterDb.collection("dataset_chunks").doc("manifest").get();
-          } catch (mErr: any) {
-            if (isQuotaExceededError(mErr)) {
-              console.warn("[Firebase] Web SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
-              firebaseApp = webApp;
-              firestoreDb = adapterDb;
-              firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
-              return true;
-            }
-            throw mErr;
-          }
-
-          firebaseApp = webApp;
-          firestoreDb = adapterDb;
-          firebaseConfigError = null;
-          console.log("=========================================");
-          console.log("[Firebase] Firebase initialized");
-          console.log("[Firebase] Firestore connected");
-          console.log(`[Firebase] Project ID: ${projectId}`);
-          if (databaseId) console.log(`[Firebase] Database ID: ${databaseId}`);
-          console.log("=========================================");
-          return true;
-        } catch (webErr: any) {
-          if (webApp && adapterDb && isQuotaExceededError(webErr)) {
-            console.warn("[Firebase] Web SDK connected, but daily read quota is exceeded. Read operations will fallback to local disk cache.");
+          await adapterDb.collection("dataset_chunks").doc("manifest").get();
+        } catch (mErr: any) {
+          if (isQuotaExceededError(mErr)) {
+            console.warn("[Firebase] Web SDK connected, but daily read quota is exceeded. Read operations will fallback to in-memory cache fallback.");
             firebaseApp = webApp;
             firestoreDb = adapterDb;
-            firebaseConfigError = "Firestore daily read quota exceeded. Operating on local cache fallback.";
+            firebaseConfigError = "Firestore daily read quota exceeded. Operating on in-memory cache fallback.";
             return true;
           }
-          const errMsg = webErr.message || String(webErr);
-          console.error(`[Firebase] Firestore Web SDK connection failed: ${errMsg}`);
-          firebaseConfigError = `Firestore connection failed: ${errMsg}`;
-          firestoreDb = null;
-          return false;
+          throw mErr;
         }
+
+        firebaseApp = webApp;
+        firestoreDb = adapterDb;
+        firebaseConfigError = null;
+        console.log("=========================================");
+        console.log("[Firebase] Firebase initialized");
+        console.log("[Firebase] Firestore connected");
+        console.log(`[Firebase] Project ID: ${projectId}`);
+        if (databaseId) console.log(`[Firebase] Database ID: ${databaseId}`);
+        console.log("=========================================");
+        return true;
+      } catch (webErr: any) {
+        if (webApp && adapterDb && isQuotaExceededError(webErr)) {
+          console.warn("[Firebase] Web SDK connected, but daily read quota is exceeded. Read operations will fallback to in-memory cache fallback.");
+          firebaseApp = webApp;
+          firestoreDb = adapterDb;
+          firebaseConfigError = "Firestore daily read quota exceeded. Operating on in-memory cache fallback.";
+          return true;
+        }
+        const errMsg = webErr.message || String(webErr);
+        console.error(`[Firebase] Firestore Web SDK connection failed: ${errMsg}`);
+        firebaseConfigError = `Firestore connection failed: ${errMsg}`;
+        firestoreDb = null;
+        return false;
       }
+    }
 
     // Diagnostic missing item reporting
     const missingItems: string[] = [];
@@ -564,7 +590,7 @@ async function initFirebase(): Promise<boolean> {
     if (!privateKey) missingItems.push("FIREBASE_PRIVATE_KEY");
     if (!apiKey) missingItems.push("FIREBASE_API_KEY");
 
-    firebaseConfigError = `Missing required Firebase configuration: ${missingItems.join(", ")}. Checked env vars (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY) and config files (firebase-applet-config.json, firebase_config.json).`;
+    firebaseConfigError = `Missing required Firebase configuration: ${missingItems.join(", ")}.`;
     console.error(`[Firebase] Initialization Failed: ${firebaseConfigError}`);
     firestoreDb = null;
     return false;
@@ -584,7 +610,11 @@ async function pushLotsToFirestore() {
     const docRef = firestoreDb.collection("config").doc("uploaded_lots");
     await docRef.set({ lots: uploadedLotsCache, updatedAt: Date.now() });
     console.log(`[Firebase] Successfully backed up ${uploadedLotsCache.length} uploaded lots to Firestore.`);
-  } catch (err) {
+  } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      console.warn("[Firebase] Quota exceeded while backing up uploaded lots to Firestore.");
+      return;
+    }
     console.error("[Firebase] Error backing up uploaded lots to Firestore:", err);
   }
 }
@@ -608,9 +638,7 @@ function synchronizeDashboardAndLots() {
     if (startupComplete && uploadedLotsCache.length > 0) {
       console.log("[Sync] licensesCache is verified 0. Resetting uploadedLotsCache.");
       uploadedLotsCache = [];
-      try {
-        fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8");
-      } catch (e) {}
+      try { fs.writeFileSync(UPLOADED_LOTS_PATH, "[]", "utf-8"); } catch (e) {}
     }
     recalculateStats();
     return;
@@ -707,8 +735,9 @@ function synchronizeDashboardAndLots() {
   recalculateStats();
 }
 
-// Chunked database uploader to push local cache to Firestore
-async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: boolean = false): Promise<{ success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string }> {
+// Sequential Batch Insertion Pipeline: groups records into batches of 400 documents max per writeBatch(),
+// processes sequentially with await batch.commit(), applies artificial delay between commits, and performs exponential backoff on code 8 (RESOURCE_EXHAUSTED).
+async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: boolean = false): Promise<{ success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string; quotaExceeded?: boolean }> {
   if (!firestoreDb) {
     console.log("[Firebase] Cancelled push: Firestore is not connected.");
     return { success: true, uploadedChunks: 0 };
@@ -721,7 +750,9 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
   activeSyncStatus.operation = "push";
   activeSyncStatus.startTime = Date.now();
 
-  const CHUNK_SIZE = 1000;
+  const CHUNK_SIZE = 500; // 500 records per chunk document (~80-120 KB per doc, far below 1MB doc limit)
+  const BATCH_DOC_LIMIT = 8; // 8 chunk docs per batch (~700 KB - 1 MB payload, far below 10MB batch limit)
+  const THROTTLE_DELAY_MS = 100; // Throttling delay between sequential commits to let gRPC write streams flush
   const chunksCollection = firestoreDb.collection("dataset_chunks");
 
   let existingTotalRecords = 0;
@@ -736,15 +767,21 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
         existingTotalRecords = mData?.totalRecords || 0;
         existingChunkCount = mData?.chunkCount || 0;
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (isQuotaExceededError(e)) {
+        console.warn("[Firebase] Quota limit reached while checking manifest doc in append mode.");
+        activeSyncStatus.isSyncing = false;
+        return {
+          success: false,
+          quotaExceeded: true,
+          uploadedChunks: 0,
+          error: "Firestore daily write quota reached (resource-exhausted). Data saved in-memory."
+        };
+      }
       console.warn("[Firebase] Warning reading existing manifest for append mode:", e);
     }
     startChunkIndex = existingChunkCount;
-    console.log(`[Import] Mode: APPEND`);
-    console.log(`[Import] New records received: ${records.length}`);
-    console.log(`[Import] Existing Firestore total: ${existingTotalRecords}`);
-    console.log(`[Import] Existing Firestore chunks: ${existingChunkCount}`);
-    console.log(`[Import] New chunk start index: ${startChunkIndex}`);
+    console.log(`[Import] Mode: APPEND | New records: ${records.length} | Existing Chunks: ${existingChunkCount}`);
   } else {
     console.log(`[Import] Mode: OVERWRITE | Records: ${records.length}`);
     await clearFirestoreCollection();
@@ -752,63 +789,104 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
   }
 
   const numNewChunks = Math.ceil(records.length / CHUNK_SIZE);
-  console.log(`[Import] New chunks to write: ${numNewChunks}`);
-
   let uploadedChunksCount = 0;
 
+  // Helper function to commit a single Firestore writeBatch with exponential backoff on code 8 / RESOURCE_EXHAUSTED
+  async function commitBatchWithBackoff(batch: any, batchLabel: string): Promise<void> {
+    const maxRetries = 5;
+    let attempt = 0;
+    while (attempt < maxRetries) {
+      attempt++;
+      try {
+        await batch.commit();
+        return;
+      } catch (err: any) {
+        const isResourceExhausted = isQuotaExceededError(err) || err.code === 8 || err.code === "resource-exhausted";
+        if (isResourceExhausted && attempt < maxRetries) {
+          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 8000) + Math.floor(Math.random() * 200);
+          console.warn(`[Firebase] Write stream RESOURCE_EXHAUSTED (Code 8) on ${batchLabel}. Exponential backoff retry ${attempt}/${maxRetries} in ${delayMs}ms...`);
+          await new Promise(r => setTimeout(r, delayMs));
+        } else {
+          console.error(`[Firebase] Batch commit failure on ${batchLabel} (attempt ${attempt}):`, err.message || err);
+          throw err;
+        }
+      }
+    }
+  }
+
   try {
-    const CONCURRENCY = 4;
-    const chunkIndexesToUpload: number[] = [];
+    // 1. Prepare chunk doc operations with clean lean records (omitting in-memory indexing keys)
+    const chunkBatchList: { chunkId: number; docRef: any; data: any }[] = [];
     for (let c = 0; c < numNewChunks; c++) {
-      chunkIndexesToUpload.push(c);
+      const rawChunkRecords = records.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
+      const cleanChunkRecords = rawChunkRecords.map(r => ({
+        sn: r.sn || "",
+        serialNo: r.serialNo || r.sn || "",
+        applicantId: r.applicantId || "",
+        fullName: r.fullName || "",
+        licenseNo: r.licenseNo || "",
+        category: r.category || "",
+        oldCode: r.oldCode || "",
+        newCode: r.newCode || "",
+        visitDate: r.visitDate || "",
+        receivedBy: r.receivedBy || "",
+        lotCode: r.lotCode || ""
+      }));
+      const targetChunkId = startChunkIndex + c;
+      const docRef = chunksCollection.doc(`chunk_${targetChunkId}`);
+      chunkBatchList.push({
+        chunkId: targetChunkId,
+        docRef,
+        data: {
+          chunkIndex: targetChunkId,
+          records: cleanChunkRecords,
+          updatedAt: Date.now()
+        }
+      });
     }
 
-    for (let i = 0; i < chunkIndexesToUpload.length; i += CONCURRENCY) {
-      const batch = chunkIndexesToUpload.slice(i, i + CONCURRENCY);
+    // Partition chunk docs into small sub-batches of BATCH_DOC_LIMIT docs max to guarantee < 1.5MB per batch payload
+    const batchedDocGroups: (typeof chunkBatchList)[] = [];
+    for (let i = 0; i < chunkBatchList.length; i += BATCH_DOC_LIMIT) {
+      batchedDocGroups.push(chunkBatchList.slice(i, i + BATCH_DOC_LIMIT));
+    }
+
+    // Process all document batches strictly sequentially using for...of with await batch.commit()
+    let groupIndex = 0;
+    for (const docGroup of batchedDocGroups) {
+      groupIndex++;
+      const currentBatch = firestoreDb.batch();
+
+      for (const item of docGroup) {
+        currentBatch.set(item.docRef, item.data);
+      }
+
+      const batchLabel = `Batch group ${groupIndex}/${batchedDocGroups.length} (${docGroup.length} chunk docs)`;
+      console.log(`[Firebase] Sequentially committing ${batchLabel}...`);
+
       try {
-        await Promise.all(batch.map(async (cIndex) => {
-          const chunkRecords = records.slice(cIndex * CHUNK_SIZE, (cIndex + 1) * CHUNK_SIZE);
-          const targetChunkId = startChunkIndex + cIndex;
-          
-          let attempts = 0;
-          let success = false;
-          let lastErr: any = null;
-          while (attempts < 3 && !success) {
-            attempts++;
-            try {
-              console.log(`[Import] Writing chunk_${targetChunkId} (attempt ${attempts})`);
-              await chunksCollection.doc(`chunk_${targetChunkId}`).set({
-                chunkIndex: targetChunkId,
-                records: chunkRecords,
-                updatedAt: Date.now()
-              });
-              success = true;
-            } catch (err: any) {
-              lastErr = err;
-              console.warn(`[Firebase] Retry ${attempts}/3 writing chunk_${targetChunkId}:`, err.message || err);
-              await new Promise(r => setTimeout(r, 800 * attempts));
-            }
-          }
-          if (!success) {
-            throw lastErr || new Error(`Failed to write chunk_${targetChunkId} after 3 attempts`);
-          }
-        }));
-        uploadedChunksCount += batch.length;
+        await commitBatchWithBackoff(currentBatch, batchLabel);
+        uploadedChunksCount += docGroup.length;
         activeSyncStatus.processedRecords = Math.min(records.length, uploadedChunksCount * CHUNK_SIZE);
-        // Small throttle between batches to prevent socket congestion
-        await new Promise(r => setTimeout(r, 100));
+
+        // Rate-limiting throttle delay between sequential batch commits to allow gRPC write streams to flush
+        await new Promise(res => setTimeout(res, THROTTLE_DELAY_MS));
       } catch (batchErr: any) {
-        const failedChunkIndex = startChunkIndex + (batch[0] || 0);
+        const isQuota = isQuotaExceededError(batchErr);
+        const failedChunkIndex = docGroup[0]?.chunkId ?? 0;
         const remaining = numNewChunks - uploadedChunksCount;
-        console.error(`[Firebase] Chunk upload failed at chunk_${failedChunkIndex}:`, batchErr);
+        console.error(`[Firebase] Sequential batch commit failed at chunk_${failedChunkIndex} (quotaExceeded=${isQuota}):`, batchErr.message || batchErr);
         activeSyncStatus.error = batchErr.message || String(batchErr);
         activeSyncStatus.isSyncing = false;
         return {
           success: false,
+          quotaExceeded: isQuota,
           uploadedChunks: uploadedChunksCount,
           failedChunk: failedChunkIndex,
           remainingChunks: remaining,
-          error: batchErr.message || String(batchErr)
+          error: isQuota
+            ? "Firestore write stream quota exhausted (Code 8: RESOURCE_EXHAUSTED). Records remain safe in memory."
+            : (batchErr.message || String(batchErr))
         };
       }
     }
@@ -817,39 +895,48 @@ async function pushToFirestoreInBatches(records: LicenseRecord[], isAppend: bool
     const finalTotalRecords = isAppend ? (existingTotalRecords + records.length) : records.length;
     const finalChunkCount = isAppend ? (existingChunkCount + numNewChunks) : numNewChunks;
 
-    await chunksCollection.doc("manifest").set({
-      totalRecords: finalTotalRecords,
-      chunkCount: finalChunkCount,
-      updatedAt: Date.now()
-    });
-    console.log(`[Import] Manifest updated: totalRecords=${finalTotalRecords}, chunkCount=${finalChunkCount}`);
+    try {
+      const manifestBatch = firestoreDb.batch();
+      manifestBatch.set(chunksCollection.doc("manifest"), {
+        totalRecords: finalTotalRecords,
+        chunkCount: finalChunkCount,
+        updatedAt: Date.now()
+      });
+      await commitBatchWithBackoff(manifestBatch, "Dataset Manifest Doc");
+      console.log(`[Import] Manifest updated: totalRecords=${finalTotalRecords}, chunkCount=${finalChunkCount}`);
+    } catch (mErr: any) {
+      if (isQuotaExceededError(mErr)) {
+        console.warn("[Firebase] Manifest update quota exceeded.");
+      }
+    }
 
     // Also push uploaded lots to Firestore config
-    await pushLotsToFirestore().catch(e => console.error("[Firebase] Error saving uploaded lots manifest:", e));
+    await pushLotsToFirestore().catch(e => console.warn("[Firebase] pushLotsToFirestore notice:", e?.message || e));
 
-    console.log(`[Import] Import push completed successfully (${numNewChunks} new chunks written, total chunks: ${finalChunkCount})!`);
     activeSyncStatus.isSyncing = false;
     return {
       success: true,
       uploadedChunks: numNewChunks
     };
   } catch (err: any) {
-    console.error("[Firebase] Sync push error:", err);
+    const isQuota = isQuotaExceededError(err);
+    console.error("[Firebase] Sequential batch sync push error:", err);
     activeSyncStatus.error = err.message || String(err);
     activeSyncStatus.isSyncing = false;
     return {
       success: false,
+      quotaExceeded: isQuota,
       uploadedChunks: uploadedChunksCount,
       error: err.message || String(err)
     };
   }
 }
 
-// Background sync downloader to pull remote Firestore data to local cache
-async function pullFromFirestore() {
+// Background sync downloader to pull remote Firestore chunks without full collection reads
+async function pullFromFirestore(): Promise<{ success: boolean; count: number; quotaExceeded?: boolean; error?: string }> {
   if (!firestoreDb) {
     console.log("[Firebase] Cancelled pull: Firestore is not connected.");
-    return;
+    return { success: false, count: 0, error: "Firestore not connected" };
   }
 
   activeSyncStatus.isSyncing = true;
@@ -861,100 +948,100 @@ async function pullFromFirestore() {
   activeSyncStatus.alreadySynced = false;
 
   try {
-    console.log("[Firebase] Pulling remote dataset from Firestore...");
+    console.log("[Firebase] Checking remote dataset manifest in Firestore (single doc read)...");
     let records: LicenseRecord[] = [];
 
-    // Check if chunked manifest exists
     const chunksCollection = firestoreDb.collection("dataset_chunks");
-    const manifestDoc = await chunksCollection.doc("manifest").get();
+    let manifestDoc: any = null;
+    try {
+      manifestDoc = await chunksCollection.doc("manifest").get();
+    } catch (mErr: any) {
+      if (isQuotaExceededError(mErr)) {
+        console.warn("[Firebase] Read quota exceeded reading dataset manifest. Using in-memory dataset.");
+        activeSyncStatus.isSyncing = false;
+        return { success: false, count: licensesCache.length, quotaExceeded: true, error: "Firestore read quota exceeded." };
+      }
+      throw mErr;
+    }
 
-    if (manifestDoc.exists) {
+    if (manifestDoc && manifestDoc.exists) {
       const manifest = manifestDoc.data();
       const chunkCount = manifest?.chunkCount || 0;
-      console.log(`[Firebase] Found chunked dataset manifest with ${chunkCount} chunks (${manifest?.totalRecords} records)...`);
+      const totalExpected = manifest?.totalRecords || 0;
+      console.log(`[Firebase] Manifest found: ${chunkCount} chunks (${totalExpected.toLocaleString()} total records).`);
 
-      const CONCURRENCY = 15;
+      // If in-memory cache already has complete data matching the manifest, SKIP redundant chunk reads!
+      if (licensesCache.length >= totalExpected && totalExpected > 0) {
+        console.log(`[Firebase] In-memory cache is already up-to-date (${licensesCache.length.toLocaleString()} records). Skipping chunk downloads to save Firestore quota!`);
+        activeSyncStatus.isSyncing = false;
+        activeSyncStatus.alreadySynced = true;
+        cacheReady = true;
+        startupError = null;
+        return { success: true, count: licensesCache.length };
+      }
+
+      const CONCURRENCY = 6;
       for (let c = 0; c < chunkCount; c += CONCURRENCY) {
         const batchIndices = [];
         for (let j = c; j < Math.min(c + CONCURRENCY, chunkCount); j++) {
           batchIndices.push(j);
         }
-        const docs = await Promise.all(
-          batchIndices.map(idx => chunksCollection.doc(`chunk_${idx}`).get())
-        );
-        for (const chunkDoc of docs) {
-          if (chunkDoc.exists) {
-            const chunkData = chunkDoc.data();
-            if (chunkData && Array.isArray(chunkData.records)) {
-              records.push(...chunkData.records);
+        try {
+          const docs = await Promise.all(
+            batchIndices.map(idx => chunksCollection.doc(`chunk_${idx}`).get())
+          );
+          for (const chunkDoc of docs) {
+            if (chunkDoc.exists) {
+              const chunkData = chunkDoc.data();
+              if (chunkData && Array.isArray(chunkData.records)) {
+                records.push(...chunkData.records);
+              }
             }
           }
+          activeSyncStatus.processedRecords = records.length;
+          activeSyncStatus.totalRecords = totalExpected || records.length;
+        } catch (cErr: any) {
+          if (isQuotaExceededError(cErr)) {
+            console.warn(`[Firebase] Read quota exceeded at chunk batch ${c}. Preserving ${records.length} hydrated records and local cache.`);
+            break;
+          }
+          throw cErr;
         }
-        activeSyncStatus.processedRecords = records.length;
-        activeSyncStatus.totalRecords = manifest?.totalRecords || records.length;
       }
     } else {
-      console.log("[Firebase] Manifest not found. Falling back to individual licenses collection query...");
-      const collectionRef = firestoreDb.collection("licenses");
-      let snapshot = await collectionRef.limit(5000).get();
-      while (!snapshot.empty) {
-        snapshot.docs.forEach((doc) => {
-          records.push(doc.data() as LicenseRecord);
-        });
-        activeSyncStatus.processedRecords = records.length;
-        const lastDoc = snapshot.docs[snapshot.docs.length - 1];
-        snapshot = await collectionRef.startAfter(lastDoc).limit(5000).get();
-      }
+      console.log("[Firebase] Manifest not found. Skipping legacy full-collection scan to preserve quota.");
     }
 
-    // Sort records by sn numerically if sn exists
-    records.sort((a, b) => {
-      const numA = parseInt(a.sn, 10);
-      const numB = parseInt(b.sn, 10);
-      if (!isNaN(numA) && !isNaN(numB)) {
-        return numA - numB;
-      }
-      return 0;
-    });
-
-    console.log(`[Firebase] Pull complete. Loaded ${records.length} records.`);
-    
     if (records.length > 0) {
-      saveJsonDatabaseSafe(records);
-      writeCsvDatabase(records);
+      // Sort records by sn numerically
+      records.sort((a, b) => {
+        const numA = parseInt(a.sn, 10);
+        const numB = parseInt(b.sn, 10);
+        if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+        return 0;
+      });
 
       licensesCache = records;
+      saveJsonDatabaseSafe(records);
+      writeCsvDatabase(records);
       rebuildSearchIndexes();
       cacheReady = true;
       startupError = null;
-      console.log(`[Firebase] In-memory licensesCache updated with ${records.length} records from Firestore.`);
-    } else {
-      console.log("[Firebase] Firestore pulled 0 records. Retaining current cache if available.");
-      if (licensesCache.length === 0) {
-        loadDatabaseIntoCache();
-      }
-      if (licensesCache.length > 0) {
-        cacheReady = true;
-        startupError = null;
-      } else {
-        cacheReady = false;
-        startupError = "Firestore dataset hydration returned 0 records.";
-      }
+      console.log(`[Firebase] Hydration complete: ${records.length.toLocaleString()} records loaded into memory.`);
     }
 
     await pullLotsFromFirestore();
     synchronizeDashboardAndLots();
-    await pushLotsToFirestore().catch(() => {});
 
     activeSyncStatus.isSyncing = false;
+    return { success: true, count: licensesCache.length };
   } catch (err: any) {
-    console.error("[Firebase] Sync pull error:", err);
+    const isQuota = isQuotaExceededError(err);
+    console.error("[Firebase] Sync pull error (quotaExceeded=" + isQuota + "):", err.message || err);
     activeSyncStatus.error = err.message || String(err);
     activeSyncStatus.isSyncing = false;
 
-    // Fall back to local disk backup if RAM cache is empty
     if (licensesCache.length === 0) {
-      console.log("[Firebase] Attempting local disk backup load due to pull failure...");
       loadDatabaseIntoCache();
       loadUploadedLotsIntoCache();
     }
@@ -964,30 +1051,54 @@ async function pullFromFirestore() {
       synchronizeDashboardAndLots();
       cacheReady = true;
       startupError = null;
-      console.log(`[Firebase] Active fallback: Local RAM cache operational with ${licensesCache.length.toLocaleString()} records.`);
     }
+    return { success: false, count: licensesCache.length, quotaExceeded: isQuota, error: err.message || String(err) };
   }
 }
 
-// Helper to clear Firestore licenses collection
+// Helper to clear Firestore licenses chunk collection
 async function clearFirestoreCollection() {
   if (!firestoreDb) return;
   try {
     console.log("[Firebase] Clearing chunked dataset and uploaded lots in Firestore...");
     const chunksCollection = firestoreDb.collection("dataset_chunks");
-    const manifestDoc = await chunksCollection.doc("manifest").get();
     let chunkCount = 0;
-    if (manifestDoc.exists) {
-      const manifest = manifestDoc.data();
-      chunkCount = manifest?.chunkCount || 0;
-    }
+    try {
+      const manifestDoc = await chunksCollection.doc("manifest").get();
+      if (manifestDoc.exists) {
+        const manifest = manifestDoc.data();
+        chunkCount = manifest?.chunkCount || 0;
+      }
+    } catch (e) {}
+
     const maxChunksToDelete = Math.max(chunkCount, 50);
-    for (let c = 0; c < maxChunksToDelete; c++) {
-      await chunksCollection.doc(`chunk_${c}`).delete().catch(() => {});
+    const BATCH_LIMIT = 400;
+    
+    for (let c = 0; c < maxChunksToDelete; c += BATCH_LIMIT) {
+      const batch = firestoreDb.batch();
+      const end = Math.min(c + BATCH_LIMIT, maxChunksToDelete);
+      for (let j = c; j < end; j++) {
+        batch.delete(chunksCollection.doc(`chunk_${j}`));
+      }
+      if (c === 0) {
+        batch.delete(chunksCollection.doc("manifest"));
+      }
+      try {
+        await batch.commit();
+        await new Promise(r => setTimeout(r, 100));
+      } catch (delErr: any) {
+        if (isQuotaExceededError(delErr)) {
+          console.warn("[Firebase] Quota limit during batch delete chunk.");
+          return;
+        }
+      }
     }
-    await chunksCollection.doc("manifest").delete().catch(() => {});
     console.log("[Firebase] Successfully cleared dataset_chunks in Firestore.");
-  } catch (err) {
+  } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      console.warn("[Firebase] Quota reached during clear collection.");
+      return;
+    }
     console.error("[Firebase] Error clearing dataset_chunks:", err);
   }
 }
@@ -1003,7 +1114,7 @@ function asyncPushToFirestoreIfConnected(records: LicenseRecord[], overwrite: bo
       await pushToFirestoreInBatches(records);
     };
     runSync().catch((e) => {
-      console.error("[Firebase] Background push failed:", e);
+      console.warn("[Firebase] Background push notice:", e?.message || e);
     });
   }
 }
@@ -1018,13 +1129,12 @@ async function pullLotsFromFirestore() {
       const data = doc.data();
       if (data && Array.isArray(data.lots) && data.lots.length > 0) {
         uploadedLotsCache = data.lots;
-        fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+        try { fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8"); } catch (e) {}
         console.log(`[Firebase] Successfully pulled ${uploadedLotsCache.length} uploaded lots from Firestore.`);
         return;
       }
     }
 
-    // Fallback: If uploaded lots doc is missing or empty, but licensesCache has records, synthesize lot list
     if (licensesCache.length > 0) {
       const lotCounts: Record<string, number> = {};
       for (const rec of licensesCache) {
@@ -1039,12 +1149,15 @@ async function pullLotsFromFirestore() {
         records: count,
         status: "Active"
       }));
-      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+      try { fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8"); } catch (e) {}
       await pushLotsToFirestore();
-      console.log(`[Firebase] Synthesized and backed up ${uploadedLotsCache.length} lots from active license records.`);
     }
-  } catch (err) {
-    console.error("[Firebase] Error pulling uploaded lots from Firestore:", err);
+  } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      console.warn("[Firebase] Quota reached during pullLotsFromFirestore.");
+      return;
+    }
+    console.warn("[Firebase] Error pulling uploaded lots from Firestore:", err);
   }
 }
 
@@ -1052,7 +1165,7 @@ function writeCsvDatabase(records: LicenseRecord[]) {
   setImmediate(() => {
     try {
       if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+        try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
       }
       const tmpPath = `${CSV_DB_PATH}.tmp.${process.pid}.${Date.now()}`;
       const fd = fs.openSync(tmpPath, "w");
@@ -1071,11 +1184,8 @@ function writeCsvDatabase(records: LicenseRecord[]) {
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fs.renameSync(tmpPath, CSV_DB_PATH);
-      if (global.gc) {
-        try { (global as any).gc(); } catch (e) {}
-      }
     } catch (e) {
-      console.error("Error writing CSV database atomically:", e);
+      // Non-fatal on ephemeral / stateless server environments
     }
   });
 }
@@ -1084,9 +1194,7 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
   try {
     const parsed = JSON.parse(rawData);
     if (Array.isArray(parsed)) return parsed;
-  } catch (e) {
-    // Expected on truncated JSON files
-  }
+  } catch (e) {}
 
   try {
     let lastPos = rawData.length;
@@ -1107,16 +1215,13 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
       try {
         const parsed = JSON.parse(candidate);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          console.log(`[JSON Recovery] Successfully recovered ${parsed.length.toLocaleString()} valid records from truncated JSON backup.`);
           return parsed;
         }
       } catch (err) {
         lastPos = lastBraceIndex;
       }
     }
-  } catch (recErr) {
-    console.warn("[JSON Recovery] Could not recover truncated JSON:", recErr);
-  }
+  } catch (recErr) {}
 
   return null;
 }
@@ -1124,7 +1229,6 @@ function parseCorruptedJsonArray(rawData: string): any[] | null {
 function loadDatabaseFromCsvFallback(): LicenseRecord[] {
   if (!fs.existsSync(CSV_DB_PATH)) return [];
   try {
-    console.log("[CSV Database] Reading database from license_db.csv...");
     const content = fs.readFileSync(CSV_DB_PATH, "utf-8");
     const lines = content.split(/\r?\n/);
     if (lines.length <= 1) return [];
@@ -1165,23 +1269,19 @@ function loadDatabaseFromCsvFallback(): LicenseRecord[] {
         });
       }
     }
-    console.log(`[CSV Database] Successfully loaded ${records.length.toLocaleString()} records from CSV database.`);
     return records;
   } catch (err) {
-    console.error("[CSV Database] Error parsing CSV database file:", err);
     return [];
   }
 }
 
-// Load database into cache on startup
+// Load database into cache on startup (from local disk if available)
 function loadDatabaseIntoCache() {
   try {
     let jsonRecords: LicenseRecord[] = [];
     let isCorruptedJson = false;
 
     if (fs.existsSync(JSON_DB_PATH)) {
-      console.log("Loading license database into memory...");
-      const startTime = Date.now();
       try {
         const rawData = fs.readFileSync(JSON_DB_PATH, "utf-8");
         try {
@@ -1193,7 +1293,6 @@ function loadDatabaseIntoCache() {
             }));
           }
         } catch (jsonErr: any) {
-          console.warn(`[Database] Notice: Local JSON file was incomplete or truncated. Attempting recovery and checking CSV backup...`);
           isCorruptedJson = true;
           const recovered = parseCorruptedJsonArray(rawData);
           if (Array.isArray(recovered)) {
@@ -1203,39 +1302,28 @@ function loadDatabaseIntoCache() {
             }));
           }
         }
-      } catch (e) {
-        console.warn("[Database] Error reading local JSON file:", e);
-      }
-      if (jsonRecords.length > 0) {
-        console.log(`Loaded ${jsonRecords.length.toLocaleString()} licenses from JSON in ${Date.now() - startTime}ms.`);
-      }
+      } catch (e) {}
     }
 
-    // Check CSV backup as well
     let csvRecords: LicenseRecord[] = [];
     if (fs.existsSync(CSV_DB_PATH)) {
       csvRecords = loadDatabaseFromCsvFallback();
     }
 
-    // Always choose whichever valid backup contains the most complete dataset
     if (csvRecords.length > jsonRecords.length) {
-      console.log(`[Database] CSV backup contains more records (${csvRecords.length.toLocaleString()}) than JSON (${jsonRecords.length.toLocaleString()}). Using CSV dataset.`);
       licensesCache = csvRecords;
       saveJsonDatabaseSafe(licensesCache);
     } else if (jsonRecords.length > 0) {
       licensesCache = jsonRecords;
       if (isCorruptedJson) {
-        console.log("[Database] Re-saving cleaned JSON database to disk...");
         saveJsonDatabaseSafe(licensesCache);
       }
     } else {
       licensesCache = [];
-      console.log("No local database records found. Cache initialized empty.");
     }
 
     rebuildSearchIndexes();
   } catch (error) {
-    console.error("Error reading database file:", error);
     if (licensesCache.length === 0 && fs.existsSync(CSV_DB_PATH)) {
       licensesCache = loadDatabaseFromCsvFallback();
     }
@@ -1288,7 +1376,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Increase JSON and URL-encoded payload limits to handle large batches and continuous lot imports
+// JSON and URL-encoded payload limits
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
@@ -1303,7 +1391,7 @@ app.use(["/api/stats", "/api/search", "/api/uploaded-lots", "/api/license", "/ap
   if (!startupComplete || !cacheReady) {
     return res.status(503).json({
       success: false,
-      error: startupError || "Server Initializing. Dataset hydration from Firestore in progress...",
+      error: startupError || "Server Initializing. Dataset hydration in progress...",
       initializing: true,
       databaseReady,
       cacheReady,
@@ -1325,7 +1413,7 @@ app.post("/api/uploaded-lots", async (req, res) => {
     const { uploadedLots } = req.body;
     if (Array.isArray(uploadedLots)) {
       if ((uploadedLots.length === 0 && licensesCache.length > 0) || (uploadedLots.length < uploadedLotsCache.length)) {
-        console.warn(`[Database] Ignoring client POST with lots (${uploadedLots.length}) smaller than server (${uploadedLotsCache.length}). Resynchronizing server lots.`);
+        console.warn(`[Database] Resynchronizing server lots.`);
         synchronizeDashboardAndLots();
       } else if (uploadedLots.length >= uploadedLotsCache.length && uploadedLots.length > 0) {
         uploadedLotsCache = uploadedLots.map(lot => ({
@@ -1338,9 +1426,9 @@ app.post("/api/uploaded-lots", async (req, res) => {
           status: lot.status || "Active",
           uploadedBy: lot.uploadedBy || lot.by || "Administrator"
         }));
-        fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
+        try { fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8"); } catch (e) {}
         if (firestoreDb) {
-          pushLotsToFirestore().catch(e => console.error("[Firebase] Async pushLotsToFirestore failed:", e));
+          pushLotsToFirestore().catch(() => {});
         }
       }
       return res.json({ success: true, message: "Uploaded lots list saved successfully.", count: uploadedLotsCache.length, uploadedLots: uploadedLotsCache });
@@ -1380,7 +1468,6 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
     const startTime = Date.now();
 
     if (!queryStr) {
-      // Fast path when query is empty: slice or iterate without pre-allocating huge arrays
       let totalMatches = 0;
       const paginatedMatches: LicenseRecord[] = [];
       const startIndex = (pageNum - 1) * limitNum;
@@ -1437,7 +1524,7 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
       }
     }
 
-    // 2. Fallback check: ONLY match if License Number or Applicant ID matches exactly
+    // 2. Fallback check: strict exact match on Applicant ID or License Number only
     if (matchedSet.size === 0) {
       const len = licensesCache.length;
       for (let i = 0; i < len; i++) {
@@ -1449,7 +1536,6 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
         const normAppId = rec._nA || (rec._nA = normalizeSearchStr(rec.applicantId));
         const normLicNo = rec._nL || (rec._nL = normalizeSearchStr(rec.licenseNo));
 
-        // Strict exact match on Applicant ID or License Number only
         if (normLicNo === normQuery || normAppId === normQuery) {
           matchedSet.add(rec);
         }
@@ -1457,7 +1543,6 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
     }
 
     const matches = Array.from(matchedSet);
-
     const totalMatches = matches.length;
     const startIndex = (pageNum - 1) * limitNum;
     const paginatedMatches = matches.slice(startIndex, startIndex + limitNum);
@@ -1476,7 +1561,7 @@ app.get("/api/search", rateLimiter(120, 60000), (req, res) => {
   }
 });
 
-// 2.5. Seed mock data disabled in production
+// Seed mock data disabled in production
 app.post("/api/seed", rateLimiter(10, 60000), (req, res) => {
   res.status(400).json({
     success: false,
@@ -1484,7 +1569,7 @@ app.post("/api/seed", rateLimiter(10, 60000), (req, res) => {
   });
 });
 
-// 3. Import CSV/Excel database with background async job processing
+// 3. Ephemeral In-Memory Streamed Chunk Processing for Lot Ingestion (200,000+ records)
 interface ImportJob {
   id: string;
   status: "processing" | "completed" | "failed";
@@ -1523,7 +1608,7 @@ async function executeImportJob(
   if (!job) return;
 
   try {
-    job.message = "Parsing spreadsheet buffer...";
+    job.message = "Parsing spreadsheet buffer in-memory...";
     job.progress = 10;
 
     let workbook: xlsx.WorkBook;
@@ -1531,14 +1616,14 @@ async function executeImportJob(
       workbook = xlsx.read(buffer, { type: "buffer" });
     } catch (parseErr: any) {
       job.status = "failed";
-      job.error = `Failed to parse Excel file: ${parseErr.message || parseErr}`;
+      job.error = `Failed to parse Excel/CSV spreadsheet: ${parseErr.message || parseErr}`;
       return;
     }
 
     const firstSheetName = workbook.SheetNames ? workbook.SheetNames[0] : "";
     if (!firstSheetName) {
       job.status = "failed";
-      job.error = "The uploaded file contains no sheets.";
+      job.error = "The uploaded spreadsheet contains no sheets.";
       return;
     }
 
@@ -1547,11 +1632,11 @@ async function executeImportJob(
 
     if (!rawRows || rawRows.length < 2) {
       job.status = "failed";
-      job.error = "File is empty or contains no data rows.";
+      job.error = "The uploaded file is empty or contains no data rows.";
       return;
     }
 
-    // Match column headers
+    // Match column headers dynamically
     const headerRow = (rawRows[0] || []).map((h: any) => normalizeSearchStr(String(h || "")));
     let snCol = -1, applicantIdCol = -1, fullNameCol = -1, licenseNoCol = -1, categoryCol = -1;
     let oldCodeCol = -1, newCodeCol = -1, visitDateCol = -1, receivedByCol = -1;
@@ -1575,7 +1660,8 @@ async function executeImportJob(
     }
 
     const parsedRecords: LicenseRecord[] = [];
-    for (let i = 1; i < rawRows.length; i++) {
+    const numRows = rawRows.length;
+    for (let i = 1; i < numRows; i++) {
       const row = rawRows[i];
       if (!row || row.length === 0) continue;
       const hasData = row.some((cell: any) => cell !== undefined && cell !== null && String(cell).trim() !== "");
@@ -1603,37 +1689,11 @@ async function executeImportJob(
       return;
     }
 
-    job.message = `Parsed ${parsedRecords.length.toLocaleString()} rows. Checking database...`;
-    job.progress = 25;
-
-    // Read authoritative state from Firestore manifest
-    let existingTotalRecords = 0;
-    let existingChunkCount = 0;
-    if (firestoreDb) {
-      try {
-        const mDoc = await firestoreDb.collection("dataset_chunks").doc("manifest").get();
-        if (mDoc.exists) {
-          const mData = mDoc.data();
-          existingTotalRecords = mData?.totalRecords || 0;
-          existingChunkCount = mData?.chunkCount || 0;
-        }
-      } catch (e) {
-        console.warn("[ImportJob] Manifest read error:", e);
-      }
-    }
-
-    // Hydrate licensesCache if RAM is behind Firestore
-    if (firestoreDb && licensesCache.length < existingTotalRecords) {
-      job.message = "Hydrating existing dataset from cloud...";
-      try {
-        await pullFromFirestore();
-      } catch (pullErr) {
-        console.warn("[ImportJob] Pre-import pull error:", pullErr);
-      }
-    }
+    job.message = `Parsed ${parsedRecords.length.toLocaleString()} rows. Validating duplicates with O(1) indexed lookup...`;
+    job.progress = 30;
 
     const isAppend = method === "append";
-    const prevRecords = isAppend ? Math.max(existingTotalRecords, licensesCache.length) : 0;
+    const prevRecords = isAppend ? licensesCache.length : 0;
 
     // Determine Lot Code
     let lotCode = requestedLotCode;
@@ -1652,13 +1712,11 @@ async function executeImportJob(
       lotCode = `${lotIndex}${suffix}-LOT`;
     }
 
-    // Duplicate detection against existing licensesCache
-    job.message = "Detecting duplicate records...";
-    job.progress = 40;
-
+    // Quota-Optimized Fast Duplicate Detection: using indexed in-memory composite hash sets (0 DB reads!)
     const existingKeys = new Set<string>();
     if (isAppend) {
-      for (const rec of licensesCache) {
+      for (let i = 0; i < licensesCache.length; i++) {
+        const rec = licensesCache[i];
         if (rec.applicantId || rec.licenseNo || rec.fullName) {
           const k = `${normalizeSearchStr(rec.applicantId)}|${normalizeSearchStr(rec.fullName)}|${normalizeSearchStr(rec.licenseNo)}|${normalizeSearchStr(rec.category)}`;
           existingKeys.add(k);
@@ -1670,7 +1728,8 @@ async function executeImportJob(
     const nonDuplicates: LicenseRecord[] = [];
     const batchKeys = new Set<string>();
 
-    for (const rec of parsedRecords) {
+    for (let i = 0; i < parsedRecords.length; i++) {
+      const rec = parsedRecords[i];
       if (!rec.fullName && !rec.licenseNo && !rec.applicantId) {
         nonDuplicates.push(rec);
         continue;
@@ -1687,7 +1746,7 @@ async function executeImportJob(
     if (isAppend && nonDuplicates.length === 0) {
       job.status = "completed";
       job.progress = 100;
-      job.message = "Yo Database Pahile Nai Sync Garieko Chha (It is already synced !!!)";
+      job.message = "यो डाटाबेस पहिले नै सिङ्क गरिएको छ (It is already synced !!!)";
       job.result = {
         success: true,
         alreadySynced: true,
@@ -1704,7 +1763,7 @@ async function executeImportJob(
       return;
     }
 
-    // Assign continuous SNs and lot code to nonDuplicates
+    // Assign continuous SNs and lot code to newly accepted records
     const assignedRecords = nonDuplicates.map((r, idx) => ({
       ...r,
       sn: String(prevRecords + 1 + idx),
@@ -1712,11 +1771,11 @@ async function executeImportJob(
       lotCode: lotCode
     }));
 
-    job.message = `Writing ${assignedRecords.length.toLocaleString()} records to cloud storage...`;
+    job.message = `Persisting ${assignedRecords.length.toLocaleString()} records into chunked storage...`;
     job.progress = 60;
 
-    // Push new chunks to Firestore
-    let firestoreSyncResult: { success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string } = { success: true, uploadedChunks: 0 };
+    // Send small chunked database batches (500-1,000 records per chunk) to Firestore
+    let firestoreSyncResult: { success: boolean; uploadedChunks: number; failedChunk?: number; remainingChunks?: number; error?: string; quotaExceeded?: boolean } = { success: true, uploadedChunks: 0 };
     if (firestoreDb) {
       if (!isAppend) {
         await clearFirestoreCollection();
@@ -1768,15 +1827,12 @@ async function executeImportJob(
       }
     }
 
-    // Save lot list to Firestore & local disk
     if (firestoreDb) {
-      await pushLotsToFirestore().catch(e => console.error("[ImportJob] Error pushing lots to Firestore:", e));
+      pushLotsToFirestore().catch(() => {});
     }
-    try {
-      fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8");
-    } catch (e) {}
+    try { fs.writeFileSync(UPLOADED_LOTS_PATH, JSON.stringify(uploadedLotsCache, null, 2), "utf-8"); } catch (e) {}
 
-    // Update RAM Cache & Local Disk
+    // Update RAM Cache & Search Indexes
     job.message = "Updating search indexes...";
     job.progress = 90;
 
@@ -1805,7 +1861,8 @@ async function executeImportJob(
       uploadedLots: uploadedLotsCache,
       lotEntry,
       timeMs: Date.now() - startTime,
-      warning: firestoreSyncResult.error ? `Firestore issue: ${firestoreSyncResult.error}` : undefined
+      quotaExceeded: firestoreSyncResult.quotaExceeded,
+      warning: firestoreSyncResult.error ? `Firestore note: ${firestoreSyncResult.error}` : undefined
     };
     console.log(`[ImportJob ${jobId}] Finished in ${Date.now() - startTime}ms. Final total: ${finalTotalRecords}`);
   } catch (err: any) {
@@ -1815,6 +1872,7 @@ async function executeImportJob(
   }
 }
 
+// File upload endpoint for continuous lot importation
 app.post("/api/import", express.raw({ type: "*/*", limit: "100mb" }), async (req, res) => {
   req.setTimeout(600000); // 10 minutes timeout for large datasets
   res.setTimeout(600000);
@@ -1840,14 +1898,14 @@ app.post("/api/import", express.raw({ type: "*/*", limit: "100mb" }), async (req
       id: jobId,
       status: "processing",
       progress: 5,
-      message: "File received. Processing import...",
+      message: "File received. Processing import in memory...",
       filename,
       method,
       lotCode: requestedLotCode,
       createdAt: Date.now()
     });
 
-    // Start background processing
+    // Start background in-memory processing
     executeImportJob(jobId, buffer, filename, method, requestedLotCode, uploadedBy).catch(err => {
       console.error(`[ImportJob ${jobId}] Unhandled error:`, err);
       const job = importJobs.get(jobId);
@@ -1869,6 +1927,7 @@ app.post("/api/import", express.raw({ type: "*/*", limit: "100mb" }), async (req
   }
 });
 
+// Import job status polling
 app.get("/api/import/status", (req, res) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   try {
@@ -1975,10 +2034,8 @@ app.post("/api/firebase/config", async (req, res) => {
     const rootConfigPath = path.join(process.cwd(), "firebase_config.json");
     const payload = JSON.stringify({ projectId, clientEmail, privateKey }, null, 2);
 
-    fs.writeFileSync(configPath, payload, "utf-8");
-    try {
-      fs.writeFileSync(rootConfigPath, payload, "utf-8");
-    } catch (e) {}
+    try { fs.writeFileSync(configPath, payload, "utf-8"); } catch (e) {}
+    try { fs.writeFileSync(rootConfigPath, payload, "utf-8"); } catch (e) {}
 
     const success = await initFirebase();
 
@@ -2003,10 +2060,10 @@ app.post("/api/firebase/disconnect", async (req, res) => {
     const configPath = path.join(DATA_DIR, "firebase_config.json");
     const rootConfigPath = path.join(process.cwd(), "firebase_config.json");
     if (fs.existsSync(configPath)) {
-      fs.unlinkSync(configPath);
+      try { fs.unlinkSync(configPath); } catch (e) {}
     }
     if (fs.existsSync(rootConfigPath)) {
-      fs.unlinkSync(rootConfigPath);
+      try { fs.unlinkSync(rootConfigPath); } catch (e) {}
     }
     
     if (firebaseApp) {
@@ -2037,9 +2094,8 @@ app.post("/api/firebase/sync/push", async (req, res) => {
       return res.json({ success: false, error: "Firebase Admin is not connected. Push sync requires a connected Firestore database." });
     }
 
-    // Run asynchronously to not block the server/client response
     pushToFirestoreInBatches(licensesCache).catch((e) => {
-      console.error("[Firebase] Push synchronization failed:", e);
+      console.warn("[Firebase] Push synchronization notice:", e?.message || e);
     });
 
     res.json({ success: true, message: "Background push to Firestore started!" });
@@ -2061,9 +2117,8 @@ app.post("/api/firebase/sync/pull", async (req, res) => {
       return res.json({ success: false, error: "Firebase Admin is not connected. Pull sync requires a connected Firestore database." });
     }
 
-    // Run asynchronously to not block the server/client response
     pullFromFirestore().catch((e) => {
-      console.error("[Firebase] Pull synchronization failed:", e);
+      console.warn("[Firebase] Pull synchronization notice:", e?.message || e);
     });
 
     res.json({ success: true, message: "Background pull from Firestore started!" });
@@ -2083,15 +2138,26 @@ app.get("/api/firebase/sync/status", (req, res) => {
 // 4. Export database back to CSV
 app.get("/api/export", (req, res) => {
   try {
-    if (!fs.existsSync(CSV_DB_PATH)) {
+    if (licensesCache.length === 0 && !fs.existsSync(CSV_DB_PATH)) {
       return res.status(404).json({ success: false, error: "Database is empty. Please import data first." });
     }
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="nepal_printed_licenses_export.csv"`);
-    
-    const fileStream = fs.createReadStream(CSV_DB_PATH);
-    fileStream.pipe(res);
+
+    if (fs.existsSync(CSV_DB_PATH)) {
+      const fileStream = fs.createReadStream(CSV_DB_PATH);
+      fileStream.pipe(res);
+    } else {
+      // Generate CSV from memory if disk file not present
+      res.write("SN,APPLICANT ID,FULL NAME,LICENSE NO,CATEGORY,OLD CODE,NEW CODE,VISIT DATE,RECEIVED BY,LOT CODE\n");
+      const records = licensesCache;
+      for (let i = 0; i < records.length; i++) {
+        const r = records[i];
+        res.write(`"${(r.sn || "").replace(/"/g, '""')}","${(r.applicantId || "").replace(/"/g, '""')}","${(r.fullName || "").replace(/"/g, '""')}","${(r.licenseNo || "").replace(/"/g, '""')}","${(r.category || "").replace(/"/g, '""')}","${(r.oldCode || "").replace(/"/g, '""')}","${(r.newCode || "").replace(/"/g, '""')}","${(r.visitDate || "").replace(/"/g, '""')}","${(r.receivedBy || "").replace(/"/g, '""')}","${(r.lotCode || "").replace(/"/g, '""')}"\n`);
+      }
+      res.end();
+    }
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -2120,16 +2186,9 @@ app.post("/api/license/receive", rateLimiter(45, 60000), (req, res) => {
       return res.status(404).json({ success: false, error: "License record not found." });
     }
 
-    // Save back to JSON file
     saveJsonDatabaseSafe(licensesCache);
-
-    // Save back to CSV file
     writeCsvDatabase(licensesCache);
-
-    // Recalculate stats cache
     recalculateStats();
-
-    // Async push update to Firestore if connected
     asyncPushToFirestoreIfConnected(licensesCache);
 
     res.json({
@@ -2151,19 +2210,17 @@ app.post("/api/license/reset", rateLimiter(5, 60000), async (req, res) => {
     rebuildSearchIndexes();
 
     if (fs.existsSync(JSON_DB_PATH)) {
-      fs.unlinkSync(JSON_DB_PATH);
+      try { fs.unlinkSync(JSON_DB_PATH); } catch (e) {}
     }
     if (fs.existsSync(CSV_DB_PATH)) {
-      fs.unlinkSync(CSV_DB_PATH);
+      try { fs.unlinkSync(CSV_DB_PATH); } catch (e) {}
     }
     if (fs.existsSync(UPLOADED_LOTS_PATH)) {
-      fs.unlinkSync(UPLOADED_LOTS_PATH);
+      try { fs.unlinkSync(UPLOADED_LOTS_PATH); } catch (e) {}
     }
 
-    // Explicit reset flag to prevent auto-seeding on next reboot
-    fs.writeFileSync(RESET_FLAG_PATH, "true", "utf-8");
+    try { fs.writeFileSync(RESET_FLAG_PATH, "true", "utf-8"); } catch (e) {}
 
-    // Sync clear to Firestore if connected
     if (firestoreDb) {
       await clearFirestoreCollection();
       await pushLotsToFirestore();
@@ -2186,17 +2243,18 @@ app.post("/api/license/recover", async (req, res) => {
     }
 
     console.log("[Recovery] Pulling records from central Firestore database...");
-    await pullFromFirestore();
+    const result = await pullFromFirestore();
     await pullLotsFromFirestore();
 
     if (fs.existsSync(RESET_FLAG_PATH)) {
-      fs.unlinkSync(RESET_FLAG_PATH);
+      try { fs.unlinkSync(RESET_FLAG_PATH); } catch (e) {}
     }
 
     res.json({
       success: true,
       message: `Successfully recovered ${licensesCache.length.toLocaleString()} records from central Firestore database.`,
-      count: licensesCache.length
+      count: licensesCache.length,
+      quotaExceeded: result.quotaExceeded
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -2214,20 +2272,15 @@ app.post("/api/license/delete-lot", async (req, res) => {
     console.log(`[Database] Request to delete lot: ${lotCode} (${count} records)`);
 
     const initialCount = licensesCache.length;
-    // Keep records that don't match the deleted lotCode
     licensesCache = licensesCache.filter(rec => rec.lotCode !== lotCode);
     const deletedCount = initialCount - licensesCache.length;
     rebuildSearchIndexes();
 
     console.log(`[Database] Successfully deleted ${deletedCount} records matching lotCode: ${lotCode}`);
 
-    // Save back to JSON file (secondary backup)
     saveJsonDatabaseSafe(licensesCache);
-
-    // Save back to CSV file (secondary backup)
     writeCsvDatabase(licensesCache);
 
-    // Sync to Firestore if connected
     if (firestoreDb) {
       console.log(`[Database] Syncing deleted lot changes (${licensesCache.length} remaining) to Firestore...`);
       await clearFirestoreCollection();
@@ -2256,60 +2309,58 @@ async function startServer() {
   // Step 1: Load local disk backup into cache as immediate offline fallback
   loadDatabaseIntoCache();
   loadUploadedLotsIntoCache();
-  console.log(`[Server] Local Disk Backup Initialized: ${licensesCache.length.toLocaleString()} records in RAM cache.`);
+  console.log(`[Server] Initial Cache State: ${licensesCache.length.toLocaleString()} records in RAM cache.`);
 
-  // Step 2 & 3: Synchronously Initialize Firebase and Hydrate from Firestore BEFORE opening HTTP listener
+  // Step 2 & 3: Quota-Optimized Firebase Initialization
   try {
     console.log("[Startup] Initializing Firebase connection...");
     const firebaseConnected = await initFirebase();
 
     if (firebaseConnected && firestoreDb) {
       databaseReady = true;
-      console.log("[Startup] Firestore connection verified. Checking dataset in Firestore...");
+      console.log("[Startup] Firestore connection verified. Checking manifest (single doc read)...");
 
-      // Load dataset_chunks/manifest doc
       let hasFirestoreData = false;
+      let manifestCount = 0;
       try {
         const chunksCollection = firestoreDb.collection("dataset_chunks");
         const manifestDoc = await chunksCollection.doc("manifest").get();
-        hasFirestoreData = manifestDoc.exists;
-
-        if (!hasFirestoreData) {
-          const legacyRef = firestoreDb.collection("licenses");
-          const legacySnapshot = await legacyRef.limit(1).get();
-          hasFirestoreData = !legacySnapshot.empty;
+        if (manifestDoc.exists) {
+          hasFirestoreData = true;
+          manifestCount = manifestDoc.data()?.totalRecords || 0;
         }
       } catch (mErr: any) {
-        console.warn("[Startup] Firestore manifest check warning:", mErr.message || mErr);
+        if (isQuotaExceededError(mErr)) {
+          console.warn("[Startup] Manifest read quota reached. Operating on in-memory dataset.");
+        } else {
+          console.warn("[Startup] Firestore manifest check warning:", mErr.message || mErr);
+        }
       }
 
       if (hasFirestoreData) {
-        console.log("[Startup] Production dataset found in Firestore. Hydrating records into RAM cache...");
-        await pullFromFirestore();
-        await pullLotsFromFirestore();
-        console.log(`[Startup] Firestore hydration complete: ${licensesCache.length.toLocaleString()} records loaded.`);
+        if (licensesCache.length >= manifestCount && licensesCache.length > 0) {
+          console.log(`[Startup] RAM cache (${licensesCache.length.toLocaleString()}) matches or exceeds Firestore manifest (${manifestCount.toLocaleString()}). Skipping redundant chunk reads to conserve quota!`);
+        } else {
+          console.log(`[Startup] Hydrating dataset chunks from Firestore...`);
+          await pullFromFirestore();
+          await pullLotsFromFirestore();
+        }
       } else {
-        console.log("[Startup] Firestore is empty or quota reached on startup. Checking for local dataset fallback...");
+        console.log("[Startup] Firestore manifest is empty or fresh. Checking for initial local records...");
         if (licensesCache.length > 0) {
-          console.log(`[Startup] Attempting background push of ${licensesCache.length.toLocaleString()} local records to Firestore...`);
-          await pushToFirestoreInBatches(licensesCache).catch(e => console.warn("[Startup] Batch push warning:", e));
-          await pushLotsToFirestore().catch(e => console.warn("[Startup] Push lots warning:", e));
+          pushToFirestoreInBatches(licensesCache).catch(e => console.warn("[Startup] Background batch push warning:", e?.message || e));
+          pushLotsToFirestore().catch(e => console.warn("[Startup] Push lots warning:", e?.message || e));
         }
       }
     } else {
-      console.warn(`[Startup] Firebase connection warning: ${firebaseConfigError || "Firestore not connected"}. Running on local cache.`);
+      console.warn(`[Startup] Firebase connection note: ${firebaseConfigError || "Firestore not connected"}. Running on in-memory cache.`);
     }
   } catch (err: any) {
-    console.error("[Startup] Firestore startup hydration warning:", err.message || err);
     if (isQuotaExceededError(err)) {
-      console.warn("[Startup] Firestore quota limit exceeded during startup. Operating on local cache fallback.");
+      console.warn("[Startup] Firestore quota limit reached during startup. Operating on in-memory cache fallback.");
+    } else {
+      console.error("[Startup] Firestore startup hydration warning:", err.message || err);
     }
-  }
-
-  // Ensure local RAM cache fallback is loaded if licensesCache is 0
-  if (licensesCache.length === 0) {
-    loadDatabaseIntoCache();
-    loadUploadedLotsIntoCache();
   }
 
   // Step 4: Verify search indexes and run startup data integrity audit
@@ -2317,52 +2368,25 @@ async function startServer() {
   synchronizeDashboardAndLots();
 
   const firestoreCount = licensesCache.length;
-  let manifestCount = 0;
-  if (firestoreDb) {
-    try {
-      const mDoc = await firestoreDb.collection("dataset_chunks").doc("manifest").get();
-      if (mDoc.exists) {
-        manifestCount = mDoc.data()?.totalRecords || 0;
-      }
-    } catch (e) {}
-  }
-
   const dashboardCount = cachedStats?.total || licensesCache.length;
   const uploadHistoryTotal = uploadedLotsCache.reduce((sum, l) => sum + (l.recentRecords !== undefined ? l.recentRecords : (l.records || 0)), 0);
 
   console.log("=========================================");
   console.log("      STARTUP DATA INTEGRITY AUDIT       ");
   console.log("=========================================");
-  console.log(`Firestore Records Loaded: ${firestoreCount}`);
-  console.log(`Manifest Records:         ${manifestCount}`);
-  console.log(`Dashboard Records:        ${dashboardCount}`);
-  console.log(`Upload History Total:     ${uploadHistoryTotal}`);
+  console.log(`Licenses In-Memory:       ${firestoreCount.toLocaleString()}`);
+  console.log(`Dashboard Records:        ${dashboardCount.toLocaleString()}`);
+  console.log(`Upload History Total:     ${uploadHistoryTotal.toLocaleString()}`);
   console.log("=========================================");
-
-  if (firestoreDb && (firestoreCount !== manifestCount || firestoreCount !== dashboardCount || (uploadHistoryTotal > 0 && uploadHistoryTotal !== firestoreCount))) {
-    console.warn("PRODUCTION DATA MISMATCH DETECTED");
-    console.log("[Startup] Auto-aligning Dashboard and Upload History from Firestore dataset...");
-    synchronizeDashboardAndLots();
-    await pushLotsToFirestore();
-  }
 
   if (licensesCache.length > 0) {
     cacheReady = true;
     startupError = null;
-    console.log(`[Startup] Cache Ready: ${licensesCache.length.toLocaleString()} records indexed and verified in RAM.`);
-  } else if (firestoreDb) {
-    console.error("[Startup] CRITICAL WARNING: Firestore is connected but 0 records were hydrated!");
-    cacheReady = false;
-    if (!startupError) {
-      startupError = "Firestore dataset hydration returned 0 records.";
-    }
   } else {
     cacheReady = true;
   }
 
-  // Mark startup complete
   startupComplete = true;
-  console.log(`[Startup] Global Readiness State: databaseReady=${databaseReady}, cacheReady=${cacheReady}, startupComplete=${startupComplete}`);
 
   // Global API Error Handler to guarantee JSON responses for all /api endpoints
   app.use("/api", (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -2370,7 +2394,7 @@ async function startServer() {
     if (res.headersSent) {
       return next(err);
     }
-    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
     const statusCode = err.status || err.statusCode || 500;
     res.status(statusCode).json({
       success: false,
@@ -2381,7 +2405,7 @@ async function startServer() {
 
   // Unmatched API catch-all handler: prevent any /api request from falling through to SPA HTML
   app.all("/api/*", (req: express.Request, res: express.Response) => {
-    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.status(404).json({
       success: false,
       error: `API route not found: ${req.method} ${req.originalUrl}`,
@@ -2408,11 +2432,10 @@ async function startServer() {
     });
   }
 
-  // Step 6: Start Express HTTP listener ONLY AFTER full hydration is complete
+  // Step 6: Start Express HTTP listener
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Server] Server Ready and Listening on http://0.0.0.0:${PORT}`);
     console.log(`[Server] Active Records in RAM Cache: ${licensesCache.length.toLocaleString()}`);
-    console.log("[Server] Dashboard, Search, and Reports are fully operational.");
   });
 }
 

@@ -1,34 +1,67 @@
 {
-  "collections": {
-    "licenses": {
-      "schema": {
-        "sn": "string",
-        "applicantId": "string",
-        "fullName": "string",
-        "licenseNo": "string",
-        "category": "string",
-        "oldCode": "string",
-        "newCode": "string",
-        "visitDate": "string",
-        "receivedBy": "string"
+  "entities": {
+    "LicenseRecord": {
+      "title": "License Record",
+      "description": "Nepal smart driving license distribution record",
+      "type": "object",
+      "properties": {
+        "sn": { "type": "string" },
+        "serialNo": { "type": "string" },
+        "applicantId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "licenseNo": { "type": "string" },
+        "category": { "type": "string" },
+        "oldCode": { "type": "string" },
+        "newCode": { "type": "string" },
+        "visitDate": { "type": "string" },
+        "receivedBy": { "type": "string" },
+        "lotCode": { "type": "string" }
       },
-      "indexes": [
-        {
-          "fields": [
-            { "fieldPath": "applicantId", "order": "ASCENDING" }
-          ]
-        },
-        {
-          "fields": [
-            { "fieldPath": "licenseNo", "order": "ASCENDING" }
-          ]
-        },
-        {
-          "fields": [
-            { "fieldPath": "fullName", "order": "ASCENDING" }
-          ]
-        }
-      ]
+      "required": ["sn", "fullName"]
+    },
+    "DatasetChunk": {
+      "title": "Dataset Chunk",
+      "description": "Chunked storage containing 500-1000 license records for quota-efficient retrieval",
+      "type": "object",
+      "properties": {
+        "chunkIndex": { "type": "number" },
+        "records": { "type": "array" },
+        "updatedAt": { "type": "number" }
+      }
+    },
+    "DatasetManifest": {
+      "title": "Dataset Manifest",
+      "description": "Metadata manifest tracking dataset totals and chunk count",
+      "type": "object",
+      "properties": {
+        "totalRecords": { "type": "number" },
+        "chunkCount": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      }
+    },
+    "UploadedLotsConfig": {
+      "title": "Uploaded Lots Config",
+      "description": "Lot upload history and statistics",
+      "type": "object",
+      "properties": {
+        "lots": { "type": "array" },
+        "updatedAt": { "type": "number" }
+      }
+    }
+  },
+  "firestore": {
+    "/dataset_chunks/{chunkId}": {
+      "schema": "DatasetChunk",
+      "description": "Chunked collection of driving license distribution records"
+    },
+    "/dataset_chunks/manifest": {
+      "schema": "DatasetManifest",
+      "description": "Master dataset manifest"
+    },
+    "/config/uploaded_lots": {
+      "schema": "UploadedLotsConfig",
+      "description": "Lot upload history configuration"
     }
   }
 }
+
